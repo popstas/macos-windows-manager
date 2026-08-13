@@ -22,7 +22,7 @@ pub fn send(cfg: &Config, payload: &serde_json::Value) -> Result<(), String> {
     if cfg.ssh_host.trim().is_empty() {
         return Err("sshHost is not set".to_string());
     }
-    let dir = &cfg.remote_dir;
+    let dir = safe_dir(&cfg.remote_dir)?;
     let name = safe_name(&cfg.host);
     let remote = format!(
         "mkdir -p {dir} && cat > {dir}/{name}.json.tmp && mv {dir}/{name}.json.tmp {dir}/{name}.json"
@@ -68,6 +68,33 @@ fn safe_name(host: &str) -> String {
     if s.is_empty() { "unnamed".to_string() } else { s }
 }
 
+/// Путь к каталогу трекеров: буквы, цифры, точка, дефис, подчёркивание, слэш и тильда.
+///
+/// Строка едет в команду чужого шелла, и кавычить её было бы половиной защиты.
+/// Кавычки не спасают от `$(...)`, который исполняется внутри двойных кавычек.
+/// Это не просто расширение переменной, а выполнение кода на удалённой машине
+/// под идентичностью пользователя ssh. Запретить это полностью может только
+/// allowlist: убрать все символы, кроме необходимых для пути.
+fn safe_dir(path: &str) -> Result<String, String> {
+    let s: String = path
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '/' || c == '~'
+            {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        Err("remoteDir is not set".to_string())
+    } else {
+        Ok(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +106,53 @@ mod tests {
         assert_eq!(safe_name("my-mac.local"), "my-mac.local");
         assert_eq!(safe_name("my mac; rm -rf /"), "my-mac--rm--rf--");
         assert_eq!(safe_name("   "), "unnamed");
+    }
+
+    #[test]
+    fn directory_path_with_space_stays_single_word() {
+        // Пробел в пути — узаконенный случай, и allowlist его пропускает. Путь
+        // остаётся одним аргументом, потому что мы вставляем его в формат-строку,
+        // а не передаём отдельным аргументом ssh. Задача именно в том, чтобы
+        // пробел не развалил команду в шелле.
+        assert_eq!(safe_dir("/home/user/my dir/").unwrap(), "/home/user/my-dir/");
+    }
+
+    #[test]
+    fn directory_path_with_command_substitution_becomes_inert() {
+        // `$(...)` внутри двойных кавычек исполняется как код. Allowlist это
+        // прерывает.
+        assert_eq!(
+            safe_dir("/path/$(whoami)/file").unwrap(),
+            "/path/--whoami-/file"
+        );
+    }
+
+    #[test]
+    fn directory_path_with_backtick_becomes_inert() {
+        // Backtick — историческая форма подстановки команд, и она тоже исполняется
+        // внутри двойных кавычек.
+        assert_eq!(safe_dir("/path/`whoami`/file").unwrap(), "/path/-whoami-/file");
+    }
+
+    #[test]
+    fn directory_path_with_quote_becomes_inert() {
+        // Кавычка развалит оболочку из строки в команде.
+        assert_eq!(safe_dir("/path/\"quoted\"/file").unwrap(), "/path/-quoted-/file");
+    }
+
+    #[test]
+    fn default_remote_dir_survives_unchanged() {
+        // Это умолчание, и его должна поломать ни одна санитизация. Если
+        // allowlist его изменит, все установки с настройками по умолчанию сломаны.
+        assert_eq!(safe_dir("~/.ccfzf/windows").unwrap(), "~/.ccfzf/windows");
+    }
+
+    #[test]
+    fn whitespace_only_directory_produces_error() {
+        // Пустой путь ничего не означает. Вернуть ошибку лучше, чем молча
+        // писать куда-то, куда пользователь не просил.
+        assert!(safe_dir("   ").is_err());
+        let err = safe_dir("   ").unwrap_err();
+        assert_eq!(err, "remoteDir is not set");
     }
 }
