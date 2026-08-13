@@ -1,5 +1,29 @@
 //! Настройки трекера.
 
+/// Брокер, через который приезжают просьбы о подъёме окна и о пометке
+/// непрочитанным.
+///
+/// Пароль живёт здесь, а не приезжает откуда-то ещё: у трея нет ни фронтенда,
+/// ни аргументов командной строки, а argv виден в списке процессов.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MqttConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    /// Префикс топиков этой машины. Подписка идёт на `<base>/#`.
+    pub base: String,
+}
+
+impl MqttConfig {
+    /// Настроен, если известны и адрес, и префикс: без второго подписываться
+    /// некуда, а угадывать чужой префикс нельзя. То же правило, что у
+    /// `Broker::is_configured` в пикере.
+    pub fn is_configured(&self) -> bool {
+        !self.host.is_empty() && !self.base.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Машина, где живут сессии и агрегатор. Умолчания нет намеренно.
@@ -15,6 +39,9 @@ pub struct Config {
     /// Срок годности индекса сессий. Ходить за дампом на каждом такте незачем:
     /// заголовок меняется на каждый ответ агента, а дамп и так отстаёт.
     pub dump_cache_ms: u64,
+    /// Брокер просьб. Пустой блок значит «просьб не будет», и тогда трекер не
+    /// объявляет умения поднимать окно.
+    pub mqtt: MqttConfig,
 }
 
 /// Разобрать конфиг, подставив умолчания всему, чего в нём нет.
@@ -87,6 +114,38 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         .and_then(|v| v.as_u64())
         .unwrap_or(15_000);
 
+    // Блок читается по полям, как и всё остальное: опечатка в порту не должна
+    // стоить адреса брокера. Отсутствующий или не-словарь блок даёт
+    // выключенный брокер, а не отказ.
+    let mqtt_map = map
+        .get("mqtt")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let mqtt_text = |key: &str| {
+        mqtt_map
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let mqtt = MqttConfig {
+        host: mqtt_text("host"),
+        port: mqtt_map
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(1883),
+        user: mqtt_text("user"),
+        password: mqtt_map
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        base: mqtt_text("base").trim_end_matches('/').to_string(),
+    };
+
     Config {
         ssh_host,
         remote_dir,
@@ -94,6 +153,7 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         terminals,
         tick_ms,
         dump_cache_ms,
+        mqtt,
     }
 }
 
@@ -224,5 +284,64 @@ mod tests {
             "com.mitchellh.ghostty".to_string(),
             "com.googlecode.iterm2".to_string(),
         ], "неправильно типизированное поле terminals должно получить умолчание");
+    }
+
+    #[test]
+    fn mqtt_block_is_read() {
+        let c = parse_config(
+            "sshHost: remote-host\nmqtt:\n  host: broker.lan\n  port: 8883\n  user: picker\n  password: secret\n  base: home/room/mac/windows\n",
+            "mac-host",
+        );
+        assert_eq!(c.mqtt.host, "broker.lan");
+        assert_eq!(c.mqtt.port, 8883);
+        assert_eq!(c.mqtt.user, "picker");
+        assert_eq!(c.mqtt.password, "secret");
+        assert_eq!(c.mqtt.base, "home/room/mac/windows");
+        assert!(c.mqtt.is_configured());
+    }
+
+    #[test]
+    fn missing_mqtt_block_is_a_switched_off_broker() {
+        // Трекер без брокера работает: он просто не объявляет умения поднимать
+        // окно, и Enter на маке остаётся тем, чем был.
+        let c = parse_config("sshHost: remote-host\n", "mac-host");
+        assert!(!c.mqtt.is_configured());
+        assert_eq!(c.mqtt.port, 1883, "порт по умолчанию нужен и выключенному");
+    }
+
+    #[test]
+    fn mqtt_without_base_is_not_configured() {
+        // Угадывать чужой префикс топиков нельзя: публиковать было бы некуда,
+        // а выглядело бы это настроенным брокером.
+        let c = parse_config("mqtt:\n  host: broker.lan\n", "mac-host");
+        assert!(!c.mqtt.is_configured());
+    }
+
+    #[test]
+    fn trailing_slash_in_base_is_cut() {
+        // Топик склеивается как `<base>/claude-focus`; лишняя косая дала бы
+        // двойную, и подписка разошлась бы с публикацией на один символ.
+        let c = parse_config("mqtt:\n  host: broker.lan\n  base: home/room/mac/windows/\n", "mac-host");
+        assert_eq!(c.mqtt.base, "home/room/mac/windows");
+    }
+
+    #[test]
+    fn junk_in_one_mqtt_field_does_not_cost_the_others() {
+        // То же правило, что и у остальных полей конфига: опечатка стоит поля,
+        // а не всех настроек.
+        let c = parse_config(
+            "mqtt:\n  host: broker.lan\n  port: \"не число\"\n  base: home/room/mac/windows\n",
+            "mac-host",
+        );
+        assert_eq!(c.mqtt.host, "broker.lan");
+        assert_eq!(c.mqtt.port, 1883);
+        assert!(c.mqtt.is_configured());
+    }
+
+    #[test]
+    fn ssh_host_survives_a_broken_mqtt_block() {
+        let c = parse_config("sshHost: remote-host\nmqtt: \"not-a-map\"\n", "mac-host");
+        assert_eq!(c.ssh_host, "remote-host");
+        assert!(!c.mqtt.is_configured());
     }
 }
