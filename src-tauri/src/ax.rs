@@ -20,7 +20,7 @@ mod imp {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
-    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 
     /// Секунда на приложение — и это не перестраховка.
     ///
@@ -187,7 +187,12 @@ mod imp {
         }
         let app = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
         let app = app.ok_or("owner application is gone")?;
-        app.activate();
+        // На macOS другие приложения могут быть впереди в момент просьбы —
+        // активация обязана состояться, несмотря на это.
+        let activated = app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+        if !activated {
+            return Err("failed to activate application".to_string());
+        }
         Ok(())
     }
 }
