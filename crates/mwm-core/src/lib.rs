@@ -3,3 +3,4 @@
 pub mod title;
 pub mod tracker;
 pub mod publish;
+pub mod config;

@@ -1,0 +1,23 @@
+# Copy to ~/.config/macos-windows-manager/config.yaml
+
+# Machine where sessions and the ccfzf aggregator live. No default: without it,
+# the tracker has nowhere to place its file and no one to ask what the session
+# is called. Any form understandable to ssh: a name from ~/.ssh/config,
+# user@host, host.domain.
+sshHost: remote-host
+
+# Directory of tracker files on that machine. One file per machine where
+# terminals are open; the aggregator reads all of them and merges.
+remoteDir: ~/.ccfzf/windows
+
+# Name of this machine. The same string is written in `windowHost` of the
+# picker's config — by matching these two strings the picker decides whether to
+# raise the window.
+# Not set — taken from the system.
+# windowHost: my-mac
+
+# Bundle id of applications whose windows count as terminals.
+terminals:
+  - net.kovidgoyal.kitty
+  - com.mitchellh.ghostty
+  - com.googlecode.iterm2
