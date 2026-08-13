@@ -157,11 +157,12 @@ mod tests {
         // Проверка, что tickMs, dumpCacheMs и remoteDir читаются правильно.
         // Renaming #[serde(rename)] для этих полей должно сломать этот тест.
         let c = parse_config(
-            "sshHost: remote-host\nremoteDir: /custom/path\nticMs: 5000\ndumpCacheMs: 30000\n",
+            "sshHost: remote-host\nremoteDir: /custom/path\ntickMs: 5000\ndumpCacheMs: 30000\n",
             "mac-host",
         );
-        assert_eq!(c.remote_dir, "/custom/path", "remoteDir (snake_case) читается из remoteDir");
-        assert_eq!(c.dump_cache_ms, 30000, "dump_cache_ms (snake_case) читается из dumpCacheMs");
+        assert_eq!(c.remote_dir, "/custom/path", "remoteDir читается из remoteDir");
+        assert_eq!(c.tick_ms, 5000, "tick_ms читается из tickMs");
+        assert_eq!(c.dump_cache_ms, 30000, "dumpCacheMs читается из dumpCacheMs");
     }
 
     #[test]
