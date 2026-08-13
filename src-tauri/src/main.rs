@@ -112,6 +112,14 @@ fn run_tracker(status: Status) {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            // Окон у приложения нет, значит и месту в доке взяться неоткуда.
+            // Без этой строки macOS считает процесс обычным приложением и
+            // держит значок в доке рядом со значком в строке меню — два места
+            // для одного трея. `Accessory` — это то же, что `LSUIElement` в
+            // Info.plist, но у нас голый бинарь без бандла, и plist'а нет.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let status = Status(Arc::new(Mutex::new("starting…".to_string())));
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
