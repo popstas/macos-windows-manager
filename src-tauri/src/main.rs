@@ -69,18 +69,42 @@ fn run_tracker(status: Status) {
         tracker.tick(&seen, &index, now);
         let bound = tracker.bound();
         let print = fingerprint(&bound);
+
+        // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
+        // и разные починки, и одна не должна прятать другую. Без этой строки
+        // трекер с нечитаемым дампом выглядел бы неотличимо от трекера, у
+        // которого просто нет сессий для привязки: публикация могла бы идти
+        // исправно (`deliver::send` про дамп ничего не знает), а привязки —
+        // не случаться никогда, молча.
+        let fetch_note = cache
+            .last_error
+            .as_deref()
+            .map(|e| format!("; index fetch failed: {e}"));
+
         if should_write(&print, last_print.as_deref(), last_write_ms, now) {
             let payload = build_file(&bound, &cfg.host, pid, now, false);
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
                     last_write_ms = now;
-                    *status.0.lock().unwrap() = format!("{} windows tracked", bound.len());
+                    let base = format!("{} windows tracked", bound.len());
+                    *status.0.lock().unwrap() =
+                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
                 }
                 // Ничего не копится: следующая посылка везёт текущее состояние
                 // целиком, а протухший файл читатель отбрасывает сам.
-                Err(e) => *status.0.lock().unwrap() = format!("publish failed: {e}"),
+                Err(e) => {
+                    let base = format!("publish failed: {e}");
+                    *status.0.lock().unwrap() =
+                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
+                }
             }
+        } else if let Some(note) = &fetch_note {
+            // Расклад не менялся, публикации в этом такте не было — но
+            // ошибка чтения дампа не должна ждать следующей записи файла,
+            // до неё может быть далеко (или не наступить вовсе, пока
+            // отпечаток не сдвинется).
+            *status.0.lock().unwrap() = format!("{} windows tracked{note}", bound.len());
         }
     }
 }
