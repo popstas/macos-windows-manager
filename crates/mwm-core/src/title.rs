@@ -56,6 +56,20 @@ mod tests {
         // начинающийся с тире или кавычки, обязан дожить до сравнения целым.
         assert_eq!(strip_decoration("- fix the parser"), "- fix the parser");
         assert_eq!(strip_decoration("\"quoted\" title"), "\"quoted\" title");
+
+        // Типографские кавычки и тире: это единственное, что защищает их от
+        // классификации как символы и снятия. ASCII-пунктуация защищена другой
+        // проверкой, так что тест без этого блока ничего про matches! не докажет.
+        // Каждый символ ниже есть в matches! — если вынуть его оттуда, тест упадёт.
+        assert_eq!(strip_decoration("– en dash title"), "– en dash title");
+        assert_eq!(strip_decoration("— em dash title"), "— em dash title");
+        assert_eq!(strip_decoration("« guillemet left"), "« guillemet left");
+        assert_eq!(strip_decoration("» guillemet right"), "» guillemet right");
+        assert_eq!(strip_decoration("\u{201C} curly double left"), "\u{201C} curly double left");
+        assert_eq!(strip_decoration("\u{201D} curly double right"), "\u{201D} curly double right");
+        assert_eq!(strip_decoration("\u{2018} curly single left"), "\u{2018} curly single left");
+        assert_eq!(strip_decoration("\u{2019} curly single right"), "\u{2019} curly single right");
+        assert_eq!(strip_decoration("… ellipsis title"), "… ellipsis title");
     }
 
     #[test]
