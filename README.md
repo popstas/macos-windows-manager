@@ -17,3 +17,24 @@ cargo build --release        # приложение, только на macOS
 
 Нужно одно — Accessibility. Без него окна не перечисляются и файл не пишется
 вовсе: пустой файл означал бы «окон нет» и погасил бы чужие пометки.
+
+## Выкатка
+
+```
+MWM_HOST=<ssh host> ./data/scripts/deploy-mac.sh
+MWM_HOST=<ssh host> ./data/scripts/deploy-mac.sh --no-build   # только перезапустить
+```
+
+Разово на маке: `rustup`, разрешение Accessibility, LaunchAgent (см.
+`docs/launchagent.md`).
+
+## Проверка, что доехало
+
+На машине агрегатора:
+
+```
+python3 -c "import json,time;o=json.load(open('$HOME/.ccfzf/windows/<host>.json'));print(time.time()-o['generated'],len(o['windows']))"
+```
+
+Первое число меньше тридцати — трекер публикует. Второе — сколько окон он
+видит.
