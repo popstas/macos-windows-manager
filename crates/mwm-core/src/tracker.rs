@@ -129,6 +129,28 @@ impl Tracker {
     pub fn unresolved(&self) -> Vec<String> {
         self.unresolved.clone()
     }
+
+    /// Вернуть сессию в непрочитанное: обнулить отметку взгляда.
+    ///
+    /// Правится и слот, и текущая привязка. Слот — потому что он источник
+    /// правды: `tick` собирает `bound` заново из слотов, и без обнуления слота
+    /// отмотка прожила бы ровно один такт. `bound` — потому что порядок
+    /// вызовов не наш: просьба приходит из другого потока в любой момент, и
+    /// файл, записанный между отмоткой и следующим тиком, обязан её показывать.
+    ///
+    /// Отпечаток расклада считает `focused_at_ms`, поэтому просить о записи
+    /// отдельно не нужно: `should_write` заметит изменение сам.
+    ///
+    /// Незнакомая сессия — молчание, а не ошибка: просьба едет с чужой машины,
+    /// и окно могли закрыть, пока она ехала.
+    pub fn mark_unread(&mut self, session_id: &str) {
+        if let Some(slot) = self.slots.get_mut(session_id) {
+            slot.focused_at_ms = 0;
+        }
+        if let Some(b) = self.bound.get_mut(session_id) {
+            b.focused_at_ms = 0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +294,51 @@ mod tests {
         // Проверяем, что title в Bound содержит очищенный заголовок, а не украшенный.
         // Если убрать strip_decoration(), это утверждение упадёт.
         assert_eq!(bound[SID].title, "ccfzf", "Bound.title должна содержать очищенный заголовок");
+    }
+
+    #[test]
+    fn mark_unread_rewinds_the_focus_stamp() {
+        // Своя отметка в seen.json у пикера бессильна: трекерная почти всегда
+        // свежее и побеждает по максимуму. Отматывать надо ту, что перебивает.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
+        t.mark_unread(SID);
+        assert_eq!(t.bound()[SID].focused_at_ms, 0, "отметка отмотана сразу, а не к следующему такту");
+    }
+
+    #[test]
+    fn a_rewound_stamp_stays_rewound_while_the_window_is_not_watched() {
+        // Слот переживает такт; не обнули мы его, следующий же тик вернул бы
+        // прежнее значение, и отмотка выглядела бы сработавшей ровно на секунду.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.mark_unread(SID);
+        t.tick(&[seen(1, "ccfzf")], &idx, 6_000);
+        assert_eq!(t.bound()[SID].focused_at_ms, 0);
+    }
+
+    #[test]
+    fn looking_at_the_window_again_marks_it_seen_again() {
+        // «Просмотрено» и значит «взгляд на нём сейчас». Возврат взгляда обязан
+        // ставить отметку заново — иначе отмотка была бы не отметкой, а
+        // запретом.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.mark_unread(SID);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 7_000);
+        assert_eq!(t.bound()[SID].focused_at_ms, 7_000);
+    }
+
+    #[test]
+    fn mark_unread_of_an_unknown_session_is_quiet() {
+        // Просьба приезжает с чужой машины и может опоздать: сессию закрыли
+        // между опросом и нажатием. Это норма, а не сбой.
+        let mut t = Tracker::new(1);
+        t.mark_unread("нет-такой");
+        assert!(t.bound().is_empty());
     }
 }
