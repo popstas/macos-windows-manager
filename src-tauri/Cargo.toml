@@ -1,0 +1,25 @@
+[package]
+name = "macos-windows-manager"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+mwm-core = { path = "../crates/mwm-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+
+# Accessibility: и перечисление окон, и (на следующем этапе) их подъём. Одно
+# разрешение на оба дела, и потому один интерфейс: заголовки можно было бы
+# брать через CGWindowList, но тот с macOS 10.15 требует Screen Recording —
+# второе разрешение ради того же самого.
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility = "0.2"
+accessibility-sys = "0.2"
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = "0.3"

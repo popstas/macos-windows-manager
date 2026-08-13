@@ -5,7 +5,7 @@
 # на которой она и работает.
 [workspace]
 resolver = "2"
-members = ["crates/mwm-core"]
+members = ["crates/mwm-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
