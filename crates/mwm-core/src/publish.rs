@@ -15,12 +15,14 @@ pub const HEARTBEAT_MS: u64 = 30_000;
 /// него смотрели.
 ///
 /// Формат — тот же, что у Windows-трекера, и это не совпадение, а условие
-/// затеи: читатель уже умеет его разбирать. Отличий три, и все объявлены.
+/// затеи: читатель уже умеет его разбирать. Отличий пять, и все объявлены.
 /// `desktop` всегда `null` — программного интерфейса к Spaces у macOS нет.
 /// `snapshots` и `projects` пусты — первое отложено, второе живёт на
 /// Windows-стороне. `focus` говорит, умеет ли этот трекер поднимать окно; на
 /// этом этапе он не умеет, и без такого признания пикер предложил бы человеку
-/// молчащий Enter.
+/// молчащий Enter. `openSession` всегда `false` — терминалы на маке открывает
+/// сам пикер. `mqttBase` называет адрес, на который просить: топик живёт в
+/// конфиге трекера, а публикует читатель.
 ///
 /// Время наружу уезжает в секундах: читатель сравнивает `generated` со своим
 /// «сейчас», а оно у него в секундах.
@@ -30,6 +32,7 @@ pub fn build_file(
     pid: u32,
     now_ms: u64,
     can_focus: bool,
+    mqtt_base: &str,
 ) -> serde_json::Value {
     let mut windows = serde_json::Map::new();
     for (sid, b) in bound {
@@ -48,6 +51,15 @@ pub fn build_file(
         "host": host,
         "pid": pid,
         "focus": can_focus,
+        // Берётся ли этот менеджер открывать сессии и терминалы. Не берётся, и
+        // это не заготовка на будущее: на маке терминал открывает сам пикер, и
+        // открывает верно. Объяви трекер обратное — пикер на маке увёл бы к
+        // нему `claude-session-open`, а разбирать её здесь некому.
+        "openSession": false,
+        // Куда просить. Пустая строка значит «спроси свой конфиг»: так вёл себя
+        // читатель до появления поля, и так он обязан вести себя с трекером
+        // прежней версии.
+        "mqttBase": mqtt_base,
         "windows": windows,
         "snapshots": [],
         "projects": [],
@@ -112,7 +124,7 @@ mod tests {
         // читатель уже умеет его разбирать, и переучивать его не пришлось.
         // Время в файле — в секундах: читатель сравнивает `generated` со своим
         // «сейчас», а оно у него в секундах.
-        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false);
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "");
         assert_eq!(v["host"], "mac-host");
         assert_eq!(v["pid"], 7);
         assert_eq!(v["generated"], 60);
@@ -127,6 +139,35 @@ mod tests {
         // «трекер прежней версии» и промолчит.
         assert!(v["snapshots"].as_array().unwrap().is_empty());
         assert!(v["projects"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_names_the_address_of_this_machine() {
+        // Читателю неоткуда узнать, куда просить о подъёме: топик живёт в
+        // конфиге трекера, а публикует читатель. Поэтому адрес называет тот,
+        // кто его знает.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true,
+                           "home/room/mac/windows");
+        assert_eq!(v["mqttBase"], "home/room/mac/windows");
+        assert_eq!(v["focus"], true);
+    }
+
+    #[test]
+    fn this_machine_does_not_open_sessions() {
+        // Терминалы на маке открывает сам пикер, и это работает. Объявив
+        // обратное, трекер увёл бы к себе просьбу `claude-session-open`,
+        // которую здесь никто не разбирает, — и Enter замолчал бы.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "");
+        assert_eq!(v["openSession"], false);
+    }
+
+    #[test]
+    fn an_unset_broker_leaves_the_address_empty() {
+        // Пустая строка читается агрегатором как «спроси свой конфиг» — так
+        // себя вёл читатель до появления поля.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "");
+        assert_eq!(v["mqttBase"], "");
+        assert_eq!(v["focus"], false);
     }
 
     #[test]
