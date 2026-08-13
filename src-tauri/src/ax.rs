@@ -98,10 +98,8 @@ mod imp {
             // Фронтовое окно спрашивается только у фронтового приложения:
             // у остальных ответ есть, но означает он «последнее активное здесь»,
             // а нам нужно «то, на которое человек смотрит сейчас».
-            let focused_title = if pid == front_pid {
-                el.attribute(&AXAttribute::focused_window())
-                    .ok()
-                    .and_then(|w| title_of(&w))
+            let focused_window = if pid == front_pid {
+                el.attribute(&AXAttribute::focused_window()).ok()
             } else {
                 None
             };
@@ -111,12 +109,14 @@ mod imp {
                     continue;
                 }
                 let id = reg.id_of(&w);
+                // Сравнение по заголовку путало бы два окна с одинаковым
+                // названием — обычное дело у терминалов на одном каталоге.
+                // `focused_window` и `w` — те же `AXUIElement`, что и в
+                // реестре, а их `PartialEq` — `CFEqual`: сравниваем сами
+                // окна, а не то, как они называются.
+                let focused = focused_window.as_ref() == Some(&w);
                 alive.push(w);
-                out.push(Seen {
-                    id,
-                    focused: focused_title.as_deref() == Some(title.as_str()),
-                    title,
-                });
+                out.push(Seen { id, focused, title });
             }
         }
         reg.retain_seen(&alive);
