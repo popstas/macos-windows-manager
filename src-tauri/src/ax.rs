@@ -94,7 +94,14 @@ mod imp {
             }
             let pid = unsafe { app.processIdentifier() };
             let el = AXUIElement::application(pid);
-            let _ = el.set_messaging_timeout(MESSAGING_TIMEOUT_S);
+            // Не поставился таймаут — сам такт всё равно продолжаем (лучше
+            // рискнуть зависанием на одном приложении, чем вовсе пропустить
+            // его), но узнать об этом стоит: до логгера в крейте руки не
+            // дошли, а stderr виден и в `cargo run`, и в Console.app у
+            // упакованного `.app`.
+            if let Err(e) = el.set_messaging_timeout(MESSAGING_TIMEOUT_S) {
+                eprintln!("mwm: set_messaging_timeout failed for pid {pid} ({id}): {e:?}");
+            }
             // Фронтовое окно спрашивается только у фронтового приложения:
             // у остальных ответ есть, но означает он «последнее активное здесь»,
             // а нам нужно «то, на которое человек смотрит сейчас».

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "macos-windows-manager",
+  "version": "0.1.0",
+  "identifier": "pro.popstas.macos-windows-manager",
+  "build": { "frontendDist": "../frontend" },
+  "app": {
+    "windows": [],
+    "macOSPrivateApi": false,
+    "trayIcon": { "iconPath": "icons/icon.png", "iconAsTemplate": true }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"]
+  }
+}

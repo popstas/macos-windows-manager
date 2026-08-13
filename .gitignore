@@ -1,2 +1,4 @@
 /target
 /data
+# Tauri генерирует их из tauri.conf.json на каждой сборке.
+/src-tauri/gen
