@@ -20,7 +20,7 @@ mod imp {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
-    use objc2_app_kit::NSWorkspace;
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 
     /// Секунда на приложение — и это не перестраховка.
     ///
@@ -53,9 +53,15 @@ mod imp {
     /// нашли прежний. Частный `_AXUIElementGetWindow` дал бы номер сразу, но
     /// это непубличный интерфейс, а платить за него нечем: в публикуемом файле
     /// идентификатора окна нет вовсе, он нужен трекеру и никому больше.
+    ///
+    /// Рядом с номером хранится pid приложения-владельца. Спросить его у окна
+    /// можно и потом, но здесь он уже известен даром — перечисление идёт по
+    /// приложениям, — а подъёму он нужен обязательно: `AXRaise` поднимает окно
+    /// внутри своего приложения, а вперёд приложение выводит уже AppKit.
     #[derive(Default)]
     pub struct Registry {
         known: Vec<(AXUIElement, u64)>,
+        owners: std::collections::HashMap<u64, i32>,
         next: u64,
     }
 
@@ -74,6 +80,9 @@ mod imp {
         /// такта.
         fn retain_seen(&mut self, seen: &[AXUIElement]) {
             self.known.retain(|(k, _)| seen.iter().any(|s| s == k));
+            let live: std::collections::HashSet<u64> =
+                self.known.iter().map(|(_, id)| *id).collect();
+            self.owners.retain(|id, _| live.contains(id));
         }
     }
 
@@ -120,6 +129,7 @@ mod imp {
                     continue;
                 }
                 let id = reg.id_of(&w);
+                reg.owners.insert(id, pid);
                 // Сравнение по заголовку путало бы два окна с одинаковым
                 // названием — обычное дело у терминалов на одном каталоге.
                 // `focused_window` и `w` — те же `AXUIElement`, что и в
@@ -146,6 +156,40 @@ mod imp {
     fn title_of(w: &AXUIElement) -> Option<String> {
         w.attribute(&AXAttribute::title()).ok().map(|t| t.to_string())
     }
+
+    /// Поднять окно и вывести вперёд его приложение.
+    ///
+    /// Два действия, а не одно. `AXRaise` поднимает окно внутри своего
+    /// приложения — среди чужих окон оно так и останется позади. Вперёд
+    /// приложение выводит AppKit, и без этого шага человек не увидел бы
+    /// ничего, а трекер отчитался бы об успехе.
+    ///
+    /// Грамоты на передний план, вокруг которой построена вся Windows-ветка,
+    /// здесь нет и не нужно: macOS решила этот вопрос разрешением
+    /// Accessibility, выданным человеком один раз.
+    pub fn raise(reg: &Registry, window_id: u64) -> Result<(), String> {
+        let el = reg
+            .known
+            .iter()
+            .find(|(_, id)| *id == window_id)
+            .map(|(el, _)| el.clone())
+            .ok_or("window is gone")?;
+        let pid = *reg.owners.get(&window_id).ok_or("window owner is unknown")?;
+        let action = CFString::from_static_string("AXRaise");
+        let err = unsafe {
+            accessibility_sys::AXUIElementPerformAction(
+                el.as_concrete_TypeRef(),
+                action.as_concrete_TypeRef(),
+            )
+        };
+        if err != accessibility_sys::kAXErrorSuccess {
+            return Err(format!("AXRaise failed: {err}"));
+        }
+        let app = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
+        let app = app.ok_or("owner application is gone")?;
+        app.activate();
+        Ok(())
+    }
 }
 
 /// На не-macOS модуль отвечает пустотой: крейт должен собираться где угодно,
@@ -158,6 +202,9 @@ mod imp {
     pub fn trusted() -> bool { false }
     pub fn prompt_for_trust() {}
     pub fn list_windows(_reg: &mut Registry, _bundle_ids: &[String]) -> Vec<Seen> { Vec::new() }
+    pub fn raise(_reg: &Registry, _window_id: u64) -> Result<(), String> {
+        Err("raise is available on macOS only".to_string())
+    }
 }
 
-pub use imp::{list_windows, prompt_for_trust, trusted, Registry};
+pub use imp::{list_windows, prompt_for_trust, raise, trusted, Registry};
