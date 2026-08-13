@@ -112,7 +112,7 @@ fn run_tracker(status: Status) {
                 window_of.insert(sid.clone(), w.id);
             }
         }
-        let print = fingerprint(&bound);
+        let print = fingerprint(&bound, link.is_live());
 
         // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
         // и разные починки, и одна не должна прятать другую. Без этой строки
