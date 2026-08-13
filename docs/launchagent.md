@@ -13,9 +13,16 @@
   <array><string>/Users/USER/projects/js/macos-windows-manager/target/release/macos-windows-manager</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/mwm.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/mwm.out.log</string>
 </dict>
 </plist>
 ```
+
+Без этих двух ключей stderr трекера уходит в никуда — ни строки ни в
+`Console.app`, ни в `log show`. Отказ соединения с брокером выглядит тогда
+просто отсутствием причины: процесс жив, файл окон публикуется, а почему
+`focus` не поднимается — неизвестно неоткуда, кроме этого файла.
 
 ```
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/pro.popstas.macos-windows-manager.plist
@@ -27,6 +34,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/pro.popstas.macos-window
 
 Разрешение Accessibility выдаётся **этому бинарю**, а не терминалу, из которого
 его запустили.
+
+Если в конфиге настроен `mqtt:`, нужно ещё одно, отдельное разрешение —
+Local Network (System Settings → Privacy & Security → Local Network). Без
+него сокет к брокеру не проходит вовсе, а отказ выглядит не отказом в
+правах, а ошибкой маршрутизации: в stderr — `mqtt connection lost: I/O: No
+route to host (os error 65)`, при живом брокере и верных учётных данных.
+Держится это разрешение так же, как Accessibility, за подпись бинаря, и
+слетает с неё точно так же на следующей же сборке.
 
 ⚠️ **Неподписанный бинарь теряет разрешение на каждой сборке.** Проверено на
 живой машине: после `cargo build --release` трекер молча перестаёт публиковать —
