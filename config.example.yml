@@ -21,3 +21,12 @@ terminals:
   - net.kovidgoyal.kitty
   - com.mitchellh.ghostty
   - com.googlecode.iterm2
+
+# Poll interval in milliseconds when the window is visible.
+# tickMs: 1000
+
+# Cache age limit for the session index in milliseconds.
+# No need to check the dump on every tick: the title changes on every agent
+# response, while the dump already lags. Keep this at least a few times
+# larger than tickMs.
+# dumpCacheMs: 15000
