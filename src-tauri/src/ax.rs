@@ -81,18 +81,22 @@ mod imp {
     pub fn list_windows(reg: &mut Registry, bundle_ids: &[String]) -> Vec<Seen> {
         let mut out = Vec::new();
         let mut alive: Vec<AXUIElement> = Vec::new();
-        let ws = unsafe { NSWorkspace::sharedWorkspace() };
-        let apps = unsafe { ws.runningApplications() };
-        let front_pid = unsafe { ws.frontmostApplication() }
-            .map(|a| unsafe { a.processIdentifier() })
+        // Обёртки objc2-app-kit безопасны сами по себе: `unsafe` тут стоял зря и
+        // стоил шести предупреждений на первой же сборке под macOS. Небезопасны
+        // ниже вызовы Accessibility — там `unsafe` и остаётся.
+        let ws = NSWorkspace::sharedWorkspace();
+        let apps = ws.runningApplications();
+        let front_pid = ws
+            .frontmostApplication()
+            .map(|a| a.processIdentifier())
             .unwrap_or(-1);
         for app in apps.iter() {
-            let Some(id) = (unsafe { app.bundleIdentifier() }) else { continue };
+            let Some(id) = app.bundleIdentifier() else { continue };
             let id = id.to_string();
             if !bundle_ids.iter().any(|b| b.eq_ignore_ascii_case(&id)) {
                 continue;
             }
-            let pid = unsafe { app.processIdentifier() };
+            let pid = app.processIdentifier();
             let el = AXUIElement::application(pid);
             // Не поставился таймаут — сам такт всё равно продолжаем (лучше
             // рискнуть зависанием на одном приложении, чем вовсе пропустить
