@@ -185,11 +185,15 @@ mod imp {
         if err != accessibility_sys::kAXErrorSuccess {
             return Err(format!("AXRaise failed: {err}"));
         }
-        let app = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
+        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
         let app = app.ok_or("owner application is gone")?;
         // На macOS другие приложения могут быть впереди в момент просьбы —
         // активация обязана состояться, несмотря на это.
-        let activated = app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+        // ActivateIgnoringOtherApps с macOS 14 не делает ничего — передаём пустой набор
+        // параметров, смысл тот же. ActivateAllWindows тут не годится — он вынес бы
+        // вперёд все окна терминала и обесценил бы AXRaise, который строкой выше
+        // поднял ровно одно нужное.
+        let activated = app.activateWithOptions(NSApplicationActivationOptions::empty());
         if !activated {
             return Err("failed to activate application".to_string());
         }
