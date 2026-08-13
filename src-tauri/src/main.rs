@@ -125,8 +125,16 @@ fn main() {
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&state, &grant, &quit])?;
+            // Значок трея заводится только здесь. Объявление `app.trayIcon` в
+            // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
+            // старте, и меню у него нет: в строке меню было видно два значка,
+            // один рабочий, другой немой.
             TrayIconBuilder::new()
                 .menu(&menu)
+                // Шаблонный значок macOS перекрашивает под строку меню, читая
+                // из картинки только прозрачность. Без него белые буквы «WM»
+                // пропадали бы на светлой теме.
+                .icon_as_template(true)
                 .icon(app.default_window_icon().cloned().unwrap())
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "grant" => ax::prompt_for_trust(),

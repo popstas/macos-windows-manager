@@ -6,8 +6,7 @@
   "build": { "frontendDist": "../frontend" },
   "app": {
     "windows": [],
-    "macOSPrivateApi": false,
-    "trayIcon": { "iconPath": "icons/icon.png", "iconAsTemplate": true }
+    "macOSPrivateApi": false
   },
   "bundle": {
     "active": true,
