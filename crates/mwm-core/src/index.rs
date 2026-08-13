@@ -43,6 +43,8 @@ mod tests {
 
     const A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+    const C: &str = "cccccccc-1111-2222-3333-444444444444";
+    const D: &str = "dddddddd-1111-2222-3333-444444444444";
 
     #[test]
     fn titles_map_to_sessions() {
@@ -65,12 +67,28 @@ mod tests {
     fn twins_go_to_the_livelier_one() {
         // Два заголовка-тёзки законны. Побеждает тот, у кого свежее активность:
         // иначе только что открытая сессия проигрывала бы суточной тёзке
-        // навсегда.
+        // навсегда. Порядок в документе взят в обе стороны — livelier запись
+        // то первая, то вторая, — иначе тест доказывал бы только «выигрывает
+        // последняя строка», что при этой конкретной раскладке данных
+        // совпадает со «выигрывает более живая» чисто по счастливой
+        // случайности порядка и не отличило бы правило от простой
+        // перезаписи.
         let idx = parse_index(&format!(
-            r#"{{"sessions":[{{"id":"{A}","title":"ccfzf","activityAt":10}},
-                             {{"id":"{B}","title":"ccfzf","activityAt":99}}]}}"#
+            r#"{{"sessions":[{{"id":"{B}","title":"ccfzf","activityAt":99}},
+                             {{"id":"{A}","title":"ccfzf","activityAt":10}},
+                             {{"id":"{C}","title":"other","activityAt":10}},
+                             {{"id":"{D}","title":"other","activityAt":99}}]}}"#
         ));
-        assert_eq!(idx.get("ccfzf"), Some(&B.to_string()));
+        assert_eq!(
+            idx.get("ccfzf"),
+            Some(&B.to_string()),
+            "живее первая запись — безусловная перезапись последней строкой выбрала бы A"
+        );
+        assert_eq!(
+            idx.get("other"),
+            Some(&D.to_string()),
+            "живее вторая запись — правило «никогда не перезаписывать первую» выбрало бы C"
+        );
     }
 
     #[test]
@@ -83,5 +101,28 @@ mod tests {
             r#"{{"sessions":[{{"id":42}},{{"title":"x"}},{{"id":"{A}","title":"ok"}}]}}"#
         ));
         assert_eq!(idx.len(), 1);
+    }
+
+    #[test]
+    fn blank_title_or_id_is_skipped_but_document_still_parses() {
+        // Другой сорт порчи, чем «поля нет вовсе»: поля на месте, но после
+        // очистки ничего не значат — заголовок из одного значка, id пустой
+        // строкой. Запись стоит себя, а не индекса; остальной документ обязан
+        // разобраться как обычно.
+        let idx = parse_index(&format!(
+            r#"{{"sessions":[{{"id":"{A}","title":"✳   "}},
+                             {{"id":"","title":"nameless"}},
+                             {{"id":"{B}","title":"ok"}}]}}"#
+        ));
+        assert!(
+            idx.get("").is_none(),
+            "пустой после очистки заголовок не должен всплыть под пустым ключом"
+        );
+        assert!(
+            idx.get("nameless").is_none(),
+            "запись с пустым id не должна попасть в индекс"
+        );
+        assert_eq!(idx.get("ok"), Some(&B.to_string()));
+        assert_eq!(idx.len(), 1, "порченые записи не в счёт — в индексе только валидная");
     }
 }
