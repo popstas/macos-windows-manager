@@ -7,6 +7,7 @@
 mod ax;
 mod deliver;
 mod dump;
+mod mqtt;
 
 use mwm_core::config::{config_path, parse_config, Config};
 use mwm_core::publish::{build_file, fingerprint, should_write};
