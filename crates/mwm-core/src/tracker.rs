@@ -233,10 +233,32 @@ mod tests {
         // Два окна с одним заголовком законны. Драться за один слот им нельзя:
         // побеждает окно с большим идентификатором — оно новее.
         let mut t = Tracker::new(1);
-        let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[seen(1, "ccfzf"), seen(9, "ccfzf")], &idx, 1_000);
-        let bound = t.bound();
-        assert_eq!(bound.len(), 1, "одна сессия — одно окно: {bound:?}");
+        // Даём двойникам заголовок, которого нет в индексе: только побеждающее
+        // окно (с большим id) войдёт в unresolved(), проигравшее — нет.
+        t.tick(&[seen(1, "unknown"), seen(9, "unknown")], &BTreeMap::new(), 1_000);
+        let unresolved = t.unresolved();
+        // Если убрать guard по winners, оба окна войдут в unresolved, и это
+        // утверждение упадёт.
+        assert_eq!(unresolved.len(), 1, "только побеждающее окно в unresolved: {unresolved:?}");
+        assert_eq!(unresolved[0], "unknown");
+    }
+
+    #[test]
+    fn only_settled_titles_enter_unresolved() {
+        // unresolved() должна возвращать только истинно устоявшиеся заголовки,
+        // а не текущие. На первом такте с стабилизацией stable_ticks=2
+        // заголовок, которого нет в индексе, не должен появиться в unresolved().
+        // Это предотвращает шум на каждом мелькании заголовка при входе в
+        // сессию.
+        let mut t = Tracker::new(2);
+        // Первый такт: заголовок не в индексе, но не устоялся.
+        t.tick(&[seen(1, "not-in-index")], &BTreeMap::new(), 1_000);
+        // Если убрать guard `let Some(stable) = t.stable.clone() else { continue }`,
+        // это утверждение упадёт, и мы будем спрашивать дамп на каждый вход.
+        assert!(t.unresolved().is_empty(), "первый такт: заголовок не устоялся");
+        // Второй такт: заголовок повторился, теперь он устоялся.
+        t.tick(&[seen(1, "not-in-index")], &BTreeMap::new(), 2_000);
+        assert_eq!(t.unresolved(), vec!["not-in-index".to_string()], "второй такт: заголовок устоялся");
     }
 
     #[test]
@@ -245,6 +267,10 @@ mod tests {
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
         t.tick(&[seen(1, "✳ ccfzf")], &idx, 1_000);
-        assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID]);
+        let bound = t.bound();
+        assert_eq!(bound.keys().collect::<Vec<_>>(), vec![SID]);
+        // Проверяем, что title в Bound содержит очищенный заголовок, а не украшенный.
+        // Если убрать strip_decoration(), это утверждение упадёт.
+        assert_eq!(bound[SID].title, "ccfzf", "Bound.title должна содержать очищенный заголовок");
     }
 }
