@@ -50,11 +50,41 @@ fn run_tracker(status: Status) {
     let mut tracker = Tracker::new(2);
     let mut registry = ax::Registry::default();
     let mut cache = dump::Cache::default();
+    let link = mqtt::spawn(&cfg.mqtt);
+    // Номер окна каждой сессии на прошлом такте: подъёму нужно окно, а `bound`
+    // рассказывает про сессии. Держим рядом, потому что `Registry` знает
+    // номера, а не сессии, и связать их может только тот, кто видел оба списка.
+    let mut window_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut last_print: Option<String> = None;
     let mut last_write_ms = 0u64;
     let pid = std::process::id();
     loop {
-        std::thread::sleep(Duration::from_millis(cfg.tick_ms));
+        // Ожидание вместо сна: просьба исполняется сразу, а не к следующему
+        // такту. Отсоединение канала (поток подписки умер) — тот же сон:
+        // `recv_timeout` на закрытом канале возвращается мгновенно, и без
+        // этой ветки такт превратился бы в горячий цикл.
+        match link.requests.recv_timeout(Duration::from_millis(cfg.tick_ms)) {
+            Ok(req) => {
+                let mut pending = vec![req];
+                // Разгребается вся очередь, а не одна просьба: иначе каждая
+                // стоила бы полного такта с перечислением окон и, возможно,
+                // походом за дампом по ssh.
+                while let Ok(next) = link.requests.try_recv() {
+                    pending.push(next);
+                }
+                for req in pending {
+                    let note = serve(&req, &mut tracker, &registry, &window_of);
+                    if let Some(note) = note {
+                        eprintln!("mwm: {note}");
+                        *status.0.lock().unwrap() = note;
+                    }
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(cfg.tick_ms));
+            }
+        }
         if !ax::trusted() {
             *status.0.lock().unwrap() = "Accessibility not granted".to_string();
             continue;
@@ -69,6 +99,19 @@ fn run_tracker(status: Status) {
         let index = cache.get(&cfg, now, wanted).clone();
         tracker.tick(&seen, &index, now);
         let bound = tracker.bound();
+        // Сессия ↔ окно. Заголовок — единственное, что есть у обоих списков:
+        // `Seen` знает номер окна, `Bound` — сессию, и оба знают, как окно
+        // называется. У `Bound` заголовок уже очищен от значка состояния,
+        // поэтому и здесь он чистится перед сравнением.
+        window_of.clear();
+        for (sid, b) in &bound {
+            if let Some(w) = seen
+                .iter()
+                .find(|w| mwm_core::title::strip_decoration(&w.title) == b.title)
+            {
+                window_of.insert(sid.clone(), w.id);
+            }
+        }
         let print = fingerprint(&bound);
 
         // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
@@ -83,7 +126,7 @@ fn run_tracker(status: Status) {
             .map(|e| format!("; index fetch failed: {e}"));
 
         if should_write(&print, last_print.as_deref(), last_write_ms, now) {
-            let payload = build_file(&bound, &cfg.host, pid, now, false, &cfg.mqtt.base);
+            let payload = build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base);
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
@@ -106,6 +149,37 @@ fn run_tracker(status: Status) {
             // до неё может быть далеко (или не наступить вовсе, пока
             // отпечаток не сдвинется).
             *status.0.lock().unwrap() = format!("{} windows tracked{note}", bound.len());
+        }
+    }
+}
+
+/// Исполнить просьбу. Возвращает жалобу, если исполнить не вышло.
+///
+/// Отказ виден человеку — строкой в трее и в stderr, — но не пикеру: у
+/// публикации нет ответа, и заводить его ради одного мака значило бы разойтись
+/// с Windows-веткой. Цена известна и уплачена ещё там.
+///
+/// Английский в жалобе — правило проекта: её видит человек.
+fn serve(
+    req: &mwm_core::request::Request,
+    tracker: &mut Tracker,
+    registry: &ax::Registry,
+    window_of: &std::collections::HashMap<String, u64>,
+) -> Option<String> {
+    use mwm_core::request::Request;
+    match req {
+        Request::Focus(id) => {
+            // Просьба о сессии без живого окна сюда не приходит: пикер
+            // предлагает подъём только строкам с полем `window`. Но гонка
+            // возможна — окно закрыли между опросом и нажатием.
+            let Some(window_id) = window_of.get(id) else {
+                return Some(format!("focus: no window for session {id}"));
+            };
+            ax::raise(registry, *window_id).err().map(|e| format!("focus: {e}"))
+        }
+        Request::Unread(id) => {
+            tracker.mark_unread(id);
+            None
         }
     }
 }
