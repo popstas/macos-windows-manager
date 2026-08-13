@@ -35,7 +35,7 @@ fn is_symbol(c: char) -> bool {
 /// тире или кавычки, обязан дожить до сравнения целым.
 fn is_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
-        || matches!(c, '–' | '—' | '«' | '»' | '"' | '"' | '\u{2018}' | '\u{2019}' | '…')
+        || matches!(c, '–' | '—' | '«' | '»' | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' | '…')
 }
 
 #[cfg(test)]
