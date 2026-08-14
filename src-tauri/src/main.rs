@@ -59,6 +59,9 @@ fn run_tracker(status: Status) {
     let mut pending_since_ms = 0u64;
     let mut registry = ax::Registry::default();
     let mut cache = dump::Cache::default();
+    // Сказали ли уже про отсутствующее разрешение. Живёт до конца жизни
+    // процесса и сбрасывается, когда разрешение появилось.
+    let mut told_untrusted = false;
     let link = mqtt::spawn(&cfg.mqtt);
     // Номер окна каждой сессии на прошлом такте: подъёму нужно окно, а `bound`
     // рассказывает про сессии. Держим рядом, потому что `Registry` знает
@@ -96,8 +99,20 @@ fn run_tracker(status: Status) {
         }
         if !ax::trusted() {
             *status.0.lock().unwrap() = "Accessibility not granted".to_string();
+            // Один раз на потерю разрешения, а не каждый такт: жалоба длинная,
+            // а такт секундный — в логе она вытеснила бы всё остальное за
+            // минуту. Латч сбрасывается ниже, когда разрешение снова есть, так
+            // что о повторной потере человек узнает снова.
+            if !told_untrusted {
+                let exe = std::env::current_exe().ok();
+                for line in mwm_core::permissions::accessibility_missing(exe.as_deref()).lines() {
+                    eprintln!("mwm: {line}");
+                }
+                told_untrusted = true;
+            }
             continue;
         }
+        told_untrusted = false;
         let now = now_ms();
         let seen = ax::list_windows(&mut registry, &cfg.terminals);
         // Список незнакомых заголовков — с прошлого такта, и это правильно:

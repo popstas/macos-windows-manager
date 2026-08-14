@@ -6,6 +6,7 @@ pub mod publish;
 pub mod config;
 pub mod geometry;
 pub mod index;
+pub mod permissions;
 pub mod request;
 pub mod snapshots;
 pub mod state;
