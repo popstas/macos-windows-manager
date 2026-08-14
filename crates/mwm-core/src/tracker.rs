@@ -1,8 +1,10 @@
 //! Тик трекера: какое окно какой сессии принадлежит.
 
+use crate::geometry::Bounds;
 use crate::index::SessionRef;
+use crate::state::SlotState;
 use crate::title::strip_decoration;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Окно, каким его увидел платформенный слой на этом такте.
 #[derive(Debug, Clone)]
@@ -12,6 +14,10 @@ pub struct Seen {
     pub id: u64,
     pub title: String,
     pub focused: bool,
+    /// Где окно стоит сейчас. `None` — платформа не ответила; это норма такта,
+    /// а не сбой, и стоит она ровно того, что положение в этот такт не
+    /// обновится.
+    pub bounds: Option<Bounds>,
 }
 
 /// Что уезжает читателю про одну сессию.
@@ -29,13 +35,28 @@ struct Tracked {
     ticks: u32,
     stable: Option<String>,
     session_id: Option<String>,
+    /// Устойчивость положения меряется здесь, а не в слоте: слот заводится
+    /// лишь когда заголовок уже устоялся и сессия найдена, а окно видно (и
+    /// может уже стоять на месте) раньше. Считай так с самого первого такта —
+    /// и к моменту, когда слот наконец заведётся, устойчивость может
+    /// оказаться уже накоплена.
+    pending: Option<Bounds>,
+    pending_ticks: u32,
 }
 
 /// Слот переживает закрытие окна: он затем и заведён, чтобы вернуть сессию на
 /// прежнее место и удержать привязку, пока заголовок меняется.
+///
+/// Устойчивое положение и то, что видно сейчас, разведены намеренно. Пока окно
+/// тащат мышкой, координаты меняются каждый такт, а запоминать их значило бы
+/// звать `fsync` на каждый такт перетаскивания.
 #[derive(Debug, Default, Clone)]
 struct Slot {
     focused_at_ms: u64,
+    bounds: Option<Bounds>,
+    title: String,
+    cwd: String,
+    last_seen_ms: u64,
 }
 
 pub struct Tracker {
@@ -44,6 +65,14 @@ pub struct Tracker {
     slots: HashMap<String, Slot>,
     bound: BTreeMap<String, Bound>,
     unresolved: Vec<String>,
+    /// Окна прошлого такта: по ним и только по ним видно, что окно появилось.
+    prev_ids: HashSet<u64>,
+    /// Первый такт после запуска не расставляет ничего. Отдельное правило, а не
+    /// следствие: на первом такте прошлого такта нет, и все открытые окна
+    /// выглядят только что появившимися.
+    started: bool,
+    placements: Vec<(u64, Bounds)>,
+    dirty: bool,
 }
 
 impl Tracker {
@@ -54,6 +83,10 @@ impl Tracker {
             slots: HashMap::new(),
             bound: BTreeMap::new(),
             unresolved: Vec::new(),
+            prev_ids: HashSet::new(),
+            started: false,
+            placements: Vec::new(),
+            dirty: false,
         }
     }
 
@@ -73,6 +106,11 @@ impl Tracker {
         self.windows.retain(|id, _| live.contains(id));
         self.bound.clear();
         self.unresolved.clear();
+        self.placements.clear();
+        let appeared_ok = self.started;
+        let prev: HashSet<u64> = std::mem::take(&mut self.prev_ids);
+        self.prev_ids = seen.iter().map(|w| w.id).collect();
+        self.started = true;
 
         for w in seen {
             let t = self.windows.entry(w.id).or_default();
@@ -84,6 +122,20 @@ impl Tracker {
             }
             if t.ticks >= self.stable_ticks {
                 t.stable = Some(w.title.clone());
+            }
+            // Устойчивость положения копится с первого такта, когда окно
+            // видно, — независимо от того, устоялся ли уже заголовок. Слот
+            // заводится позже, заголовком и сессией не ограничен: не копи
+            // трекер это здесь, окну пришлось бы устаиваться дважды подряд —
+            // сперва по заголовку, потом ещё раз по месту — прежде чем
+            // положение вообще попадёт в слот.
+            if let Some(b) = w.bounds {
+                if t.pending == Some(b) {
+                    t.pending_ticks += 1;
+                } else {
+                    t.pending = Some(b);
+                    t.pending_ticks = 1;
+                }
             }
             let Some(stable) = t.stable.clone() else { continue };
             if winners.get(w.title.as_str()) != Some(&w.id) {
@@ -105,9 +157,47 @@ impl Tracker {
                 self.unresolved.push(key.clone());
             }
             let Some(sid) = t.session_id.clone() else { continue };
+            let appeared = appeared_ok && !prev.contains(&w.id);
             let slot = self.slots.entry(sid.clone()).or_default();
-            if w.focused {
+            if w.focused && slot.focused_at_ms != now_ms {
                 slot.focused_at_ms = now_ms;
+                // Отметка взгляда живёт на диске — значит её смена и есть повод
+                // файл переписать. Без этой строки перезапуск трекера показывал
+                // бы человеку непрочитанным всё, на что он смотрел с прошлой
+                // записи файла.
+                self.dirty = true;
+            }
+            // `lastSeen` растёт каждый такт и поводом для записи не считается:
+            // считался бы — файл писался бы с `fsync` раз в секунду вечно. На
+            // диск он попадает попутно, когда файл переписывают по другой
+            // причине, и этого достаточно: читает его один и тот же процесс.
+            slot.last_seen_ms = now_ms;
+            if slot.title != key {
+                slot.title = key.clone();
+                self.dirty = true;
+            }
+            if let Some(r) = index.get(&key) {
+                if !r.cwd.is_empty() && slot.cwd != r.cwd {
+                    slot.cwd = r.cwd.clone();
+                    self.dirty = true;
+                }
+            }
+            // Расстановка спрашивается до того, как слот примет нынешние
+            // координаты: иначе он ответил бы «окно уже там, где нужно».
+            if appeared {
+                if let (Some(want), Some(now_at)) = (slot.bounds, w.bounds) {
+                    if want != now_at {
+                        self.placements.push((w.id, want));
+                    }
+                }
+            }
+            if t.pending_ticks >= self.stable_ticks {
+                if let Some(b) = t.pending {
+                    if slot.bounds != Some(b) {
+                        slot.bounds = Some(b);
+                        self.dirty = true;
+                    }
+                }
             }
             self.bound.insert(
                 sid.clone(),
@@ -131,6 +221,65 @@ impl Tracker {
         self.unresolved.clone()
     }
 
+    /// Какие окна поставить на место и куда. Пусто — ставить нечего.
+    ///
+    /// Список живёт один такт: он про окна, появившиеся именно сейчас.
+    pub fn placements(&self) -> Vec<(u64, Bounds)> {
+        self.placements.clone()
+    }
+
+    /// Менялись ли слоты с прошлого вопроса. Спрашивается перед записью файла:
+    /// он пишется с `fsync`, и писать его на каждом такте — плата за то, что не
+    /// изменилось.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// Слоты в том виде, в каком они уезжают на диск.
+    pub fn slots_state(&self) -> BTreeMap<String, SlotState> {
+        self.slots
+            .iter()
+            .map(|(sid, s)| {
+                (
+                    sid.clone(),
+                    SlotState {
+                        bounds: s.bounds,
+                        title: s.title.clone(),
+                        cwd: s.cwd.clone(),
+                        last_seen_ms: s.last_seen_ms,
+                        focused_at_ms: s.focused_at_ms,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Поднять слоты с диска. Зовётся один раз при старте, до первого такта.
+    ///
+    /// Устойчивость положения (`Tracked::pending`) не восстанавливается и не
+    /// может: она копится по окнам, а окна прошлого запуска — чужие
+    /// идентификаторы, этот запуск их не видел.
+    pub fn load_slots(&mut self, slots: BTreeMap<String, SlotState>) {
+        for (sid, s) in slots {
+            self.slots.insert(
+                sid,
+                Slot {
+                    focused_at_ms: s.focused_at_ms,
+                    bounds: s.bounds,
+                    title: s.title,
+                    cwd: s.cwd,
+                    last_seen_ms: s.last_seen_ms,
+                },
+            );
+        }
+    }
+
+    /// Сессии, у которых окно открыто на этом такте. Из них снапшотер собирает
+    /// состав раскладки.
+    pub fn open_session_ids(&self) -> Vec<String> {
+        self.bound.keys().cloned().collect()
+    }
+
     /// Вернуть сессию в непрочитанное: обнулить отметку взгляда.
     ///
     /// Правится и слот, и текущая привязка. Слот — потому что он источник
@@ -151,12 +300,15 @@ impl Tracker {
         if let Some(b) = self.bound.get_mut(session_id) {
             b.focused_at_ms = 0;
         }
+        self.dirty = true;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Bounds;
+    use crate::state::SlotState;
     use std::collections::BTreeMap;
 
     const SID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -171,7 +323,15 @@ mod tests {
     }
 
     fn seen(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false }
+        Seen { id, title: title.to_string(), focused: false, bounds: None }
+    }
+
+    fn seen_at(id: u64, title: &str, b: Bounds) -> Seen {
+        Seen { id, title: title.to_string(), focused: false, bounds: Some(b) }
+    }
+
+    fn rect(x: i32, y: i32) -> Bounds {
+        Bounds { x, y, width: 800, height: 600 }
     }
 
     #[test]
@@ -250,7 +410,7 @@ mod tests {
         let idx = index(&[("ccfzf", SID)]);
         t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.tick(&[seen(1, "ccfzf")], &idx, 9_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000, "отметка не откатывается");
@@ -308,7 +468,7 @@ mod tests {
         // свежее и побеждает по максимуму. Отматывать надо ту, что перебивает.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.mark_unread(SID);
         assert_eq!(t.bound()[SID].focused_at_ms, 0, "отметка отмотана сразу, а не к следующему такту");
@@ -320,7 +480,7 @@ mod tests {
         // прежнее значение, и отмотка выглядела бы сработавшей ровно на секунду.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
         t.mark_unread(SID);
         t.tick(&[seen(1, "ccfzf")], &idx, 6_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
@@ -333,9 +493,9 @@ mod tests {
         // запретом.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
         t.mark_unread(SID);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true }], &idx, 7_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 7_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 7_000);
     }
 
@@ -346,5 +506,148 @@ mod tests {
         let mut t = Tracker::new(1);
         t.mark_unread("нет-такой");
         assert!(t.bound().is_empty());
+    }
+
+    #[test]
+    fn an_appearing_window_is_asked_to_go_back_where_it_was() {
+        // Ради этого весь этап: сессию открыли заново, окно встаёт туда же.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        // Первый такт после запуска не ставит ничего — правило ниже.
+        t.tick(&[], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))]);
+    }
+
+    #[test]
+    fn the_first_tick_after_start_places_nothing() {
+        // Перезапуск трекера случается на каждой выкатке. Без этого правила он
+        // сгребал бы все открытые окна по вчерашним местам — включая те, что
+        // человек только что подвинул сам.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 1_000);
+        assert!(t.placements().is_empty(), "первый такт не расставляет");
+    }
+
+    #[test]
+    fn a_window_already_in_place_is_not_touched() {
+        // Просьба к платформе стоит вызова Accessibility, а он синхронный.
+        // Двигать окно туда, где оно уже стоит, — это плата ни за что.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(100, 100))], &idx, 2_000);
+        assert!(t.placements().is_empty());
+    }
+
+    #[test]
+    fn a_window_that_stayed_is_not_placed_again() {
+        // Ставится появившееся окно, а не любое видимое. Иначе трекер воевал бы
+        // с человеком за каждое перетаскивание — и победил бы трекер.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert_eq!(t.placements().len(), 1);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 3_000);
+        assert!(t.placements().is_empty(), "окно уже было в прошлом такте");
+    }
+
+    #[test]
+    fn a_session_seen_for_the_first_time_is_left_where_it_opened() {
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert!(t.placements().is_empty(), "координат не помним — двигать некуда");
+    }
+
+    #[test]
+    fn a_moved_window_is_remembered_only_after_it_settles() {
+        // Пока окно тащат мышкой, координаты меняются каждый такт. Записывать
+        // их немедленно значило бы звать fsync на каждый такт перетаскивания.
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 2_000);
+        assert_eq!(t.slots_state()[SID].bounds, Some(rect(0, 0)));
+        // Потащили: два разных положения подряд, ни одно не устоялось.
+        t.tick(&[seen_at(1, "ccfzf", rect(50, 0))], &idx, 3_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(120, 0))], &idx, 4_000);
+        assert_eq!(t.slots_state()[SID].bounds, Some(rect(0, 0)), "на лету не запоминаем");
+        // Отпустили: положение повторилось нужное число тактов.
+        t.tick(&[seen_at(1, "ccfzf", rect(200, 0))], &idx, 5_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(200, 0))], &idx, 6_000);
+        assert_eq!(t.slots_state()[SID].bounds, Some(rect(200, 0)), "устоялось — запомнили");
+    }
+
+    #[test]
+    fn the_state_is_written_only_when_something_changed() {
+        // Файл пишется с fsync. Писать его на каждом такте — плата за то, что
+        // не изменилось.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 1_000);
+        assert!(t.take_dirty(), "первое появление слота — изменение");
+        assert!(!t.take_dirty(), "спросили дважды — второй раз чисто");
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 2_000);
+        assert!(!t.take_dirty(), "ничего не менялось");
+        t.tick(&[seen_at(1, "ccfzf", rect(300, 300))], &idx, 3_000);
+        assert!(t.take_dirty(), "координаты устоялись на новом месте");
+    }
+
+    #[test]
+    fn the_working_directory_reaches_the_slot() {
+        // Оттуда его возьмёт снимок.
+        let mut t = Tracker::new(1);
+        let mut idx = BTreeMap::new();
+        idx.insert("ccfzf".to_string(), crate::index::SessionRef {
+            id: SID.to_string(),
+            cwd: "~/projects/js/ccfzf-picker".to_string(),
+        });
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 1_000);
+        assert_eq!(t.slots_state()[SID].cwd, "~/projects/js/ccfzf-picker");
+    }
+
+    #[test]
+    fn a_loaded_focus_stamp_is_not_forgotten() {
+        // Отметка взгляда переживает перезапуск: иначе после каждой выкатки
+        // человек видел бы все сессии непрочитанными разом.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState { focused_at_ms: 4_000, ..Default::default() });
+        t.load_slots(slots);
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 9_000);
+        assert_eq!(t.bound()[SID].focused_at_ms, 4_000);
+    }
+
+    #[test]
+    fn open_sessions_are_listed_for_the_snapshotter() {
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen_at(1, "ccfzf", rect(0, 0))], &idx, 1_000);
+        assert_eq!(t.open_session_ids(), vec![SID.to_string()]);
     }
 }

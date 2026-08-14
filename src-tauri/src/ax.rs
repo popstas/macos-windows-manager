@@ -137,7 +137,7 @@ mod imp {
                 // окна, а не то, как они называются.
                 let focused = focused_window.as_ref() == Some(&w);
                 alive.push(w);
-                out.push(Seen { id, focused, title });
+                out.push(Seen { id, focused, title, bounds: None });
             }
         }
         reg.retain_seen(&alive);
