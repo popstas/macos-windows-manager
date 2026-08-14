@@ -84,6 +84,26 @@ pub fn state_json(slots: &BTreeMap<String, SlotState>) -> serde_json::Value {
     json!({ "version": VERSION, "slots": out })
 }
 
+/// Куда отодвинуть порченый файл, не тронув отодвинутый прежде.
+///
+/// Первая порча обычно и есть первопричина, а разбираться приходят уже после
+/// второй: затирай мы `.bak` каждым новым сбоем, второй уносил бы уцелевшую
+/// копию первого. Нумерованных копий держим девять — каталог состояния не
+/// должен расти без предела, и когда все заняты, девятой не жалко.
+fn aside_path(path: &Path) -> std::path::PathBuf {
+    let first = path.with_extension("json.bak");
+    if !first.exists() {
+        return first;
+    }
+    for n in 1..9 {
+        let next = path.with_extension(format!("json.bak.{n}"));
+        if !next.exists() {
+            return next;
+        }
+    }
+    path.with_extension("json.bak.9")
+}
+
 pub fn read_state(path: &Path) -> BTreeMap<String, SlotState> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return BTreeMap::new();
@@ -91,7 +111,7 @@ pub fn read_state(path: &Path) -> BTreeMap<String, SlotState> {
     if serde_json::from_str::<serde_json::Value>(&text).is_err() {
         // Отодвигаем, а не удаляем: трекер обязан подняться, но байты могут
         // ещё пригодиться тому, кто будет разбираться.
-        let bak = path.with_extension("json.bak");
+        let bak = aside_path(path);
         if let Err(e) = std::fs::rename(path, &bak) {
             eprintln!("mwm: broken state file, and moving it aside failed: {e}");
         } else {
@@ -108,17 +128,28 @@ pub fn read_state(path: &Path) -> BTreeMap<String, SlotState> {
 /// данные нет, и без него потеря питания оставляет рваный файл; рваный файл
 /// стоит запомненной раскладки, ради которой всё и затевалось.
 pub fn write_atomic(path: &Path, value: &serde_json::Value) -> Result<(), String> {
-    use std::io::Write;
     let dir = path.parent().ok_or("state path has no parent directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("create state dir: {e}"))?;
     let tmp = path.with_extension("json.tmp");
+    let done = through_temp(&tmp, path, value);
+    if done.is_err() {
+        // Итоговый файл отказ не тронул — ради этого временный и заводится.
+        // Но сам он оставаться не должен: иначе каталог состояния копил бы по
+        // `.tmp` на каждый отказ, и разбираться в них было бы некому.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
+fn through_temp(tmp: &Path, path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
     {
-        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("create temp state: {e}"))?;
+        let mut f = std::fs::File::create(tmp).map_err(|e| format!("create temp state: {e}"))?;
         f.write_all(value.to_string().as_bytes())
             .map_err(|e| format!("write temp state: {e}"))?;
         f.sync_all().map_err(|e| format!("fsync temp state: {e}"))?;
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename temp state: {e}"))
+    std::fs::rename(tmp, path).map_err(|e| format!("rename temp state: {e}"))
 }
 
 #[cfg(test)]
@@ -200,6 +231,52 @@ mod tests {
         std::fs::write(&path, "{ порвано").unwrap();
         assert!(read_state(&path).is_empty());
         assert!(dir.join("state.json.bak").exists(), "байты отодвинуты, а не выброшены");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_write_takes_its_temp_file_with_it() {
+        // Отказ записи оставляет итоговый файл целым — это и есть смысл
+        // временного файла. Но сам он оставаться не должен: каталог состояния
+        // копил бы по `.tmp` на каждый отказ, и разбираться в них было бы
+        // некому.
+        //
+        // Отказ подстроен каталогом на месте файла состояния: временный файл
+        // создастся и запишется, а переименование поверх каталога не выйдет.
+        let dir = std::env::temp_dir().join(format!("mwm-state-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), slot());
+        assert!(write_atomic(&path, &state_json(&slots)).is_err(), "переименование не удалось");
+        assert!(!dir.join("state.json.tmp").exists(), "временный файл убран за собой");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_breakage_does_not_eat_the_first_backup() {
+        // Байты отодвигаются, чтобы человек мог в них разобраться. Второй сбой
+        // не должен уносить копию первого: первая порча обычно и есть
+        // первопричина, а разбираться приходят уже после второй.
+        let dir = std::env::temp_dir().join(format!("mwm-state-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, "{ порвано первый раз").unwrap();
+        assert!(read_state(&path).is_empty());
+        std::fs::write(&path, "{ порвано второй раз").unwrap();
+        assert!(read_state(&path).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("state.json.bak")).unwrap(),
+            "{ порвано первый раз",
+            "первая порча пережила вторую"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("state.json.bak.1")).unwrap(),
+            "{ порвано второй раз",
+            "вторая легла рядом, а не поверх"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
