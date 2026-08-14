@@ -126,12 +126,17 @@ fn run_tracker(status: Status) {
         // этом потоке. Клампинг считается в момент расстановки, а не при
         // запоминании: экраны могли смениться, пока сессия была закрыта.
         let screens = ax::displays();
+        // Жалоба на расстановку копится до конца такта, а не пишется в трей
+        // сразу: итог такта ниже переписывает ту же ячейку целиком и затирал
+        // бы её в том же обороте. В stderr она оставалась, но трей —
+        // единственный канал, где человек видит отказ, не читая логов.
+        let mut place_note = String::new();
         for (window_id, want) in tracker.placements() {
             let target = mwm_core::geometry::clamp_to_displays(want, &screens);
             if let Err(e) = ax::place(&registry, window_id, target) {
                 // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
                 eprintln!("mwm: place failed: {e}");
-                *status.0.lock().unwrap() = format!("place failed: {e}");
+                place_note = format!("place failed: {e}");
             }
         }
         let bound = tracker.bound();
@@ -220,7 +225,7 @@ fn run_tracker(status: Status) {
         let fetch_note = cache
             .last_error
             .as_deref()
-            .map(|e| format!("; index fetch failed: {e}"));
+            .map_or_else(String::new, |e| format!("index fetch failed: {e}"));
 
         // Файл состояния пишется с `fsync`, и писать его на каждом такте —
         // плата за то, что не изменилось.
@@ -242,28 +247,29 @@ fn run_tracker(status: Status) {
             // что уже потрачено на его рождение.
             let payload =
                 build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &snaps);
+            let notes = [place_note.as_str(), fetch_note.as_str()];
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
                     last_write_ms = now;
                     let base = format!("{} windows tracked", bound.len());
-                    *status.0.lock().unwrap() =
-                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
+                    *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
                 // Ничего не копится: следующая посылка везёт текущее состояние
                 // целиком, а протухший файл читатель отбрасывает сам.
                 Err(e) => {
                     let base = format!("publish failed: {e}");
-                    *status.0.lock().unwrap() =
-                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
+                    *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
             }
-        } else if let Some(note) = &fetch_note {
-            // Расклад не менялся, публикации в этом такте не было — но
-            // ошибка чтения дампа не должна ждать следующей записи файла,
-            // до неё может быть далеко (или не наступить вовсе, пока
-            // отпечаток не сдвинется).
-            *status.0.lock().unwrap() = format!("{} windows tracked{note}", bound.len());
+        } else if !place_note.is_empty() || !fetch_note.is_empty() {
+            // Расклад не менялся, публикации в этом такте не было — но отказ
+            // расстановки и ошибка чтения дампа не должны ждать следующей
+            // записи файла, до неё может быть далеко (или не наступить вовсе,
+            // пока отпечаток не сдвинется).
+            let base = format!("{} windows tracked", bound.len());
+            *status.0.lock().unwrap() =
+                mwm_core::status::status_line(&base, &[place_note.as_str(), fetch_note.as_str()]);
         }
     }
 }
@@ -373,6 +379,23 @@ fn serve(
     }
 }
 
+/// Время сборки этого бинаря, если оно в него вшито.
+///
+/// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
+/// штампе значит именно это — см. `build.rs`.
+///
+/// Живёт здесь, а не рядом с `version_item_label` в `mwm-core`: `env!` читает
+/// переменную того крейта, в котором написан, а вшивает её `build.rs`
+/// приложения.
+fn build_time() -> Option<chrono::NaiveDateTime> {
+    use chrono::TimeZone;
+    let secs: i64 = env!("MWM_BUILD_UNIX").parse().ok()?;
+    if secs == 0 {
+        return None;
+    }
+    Some(chrono::Local.timestamp_opt(secs, 0).single()?.naive_local())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -388,7 +411,21 @@ fn main() {
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&state, &grant, &quit])?;
+            // Неактивный пункт: он не действие, а подпись. Стоит последним, под
+            // «Quit», — читают его редко, а два пункта выше нажимают, и
+            // сдвигать их ради подписи нельзя.
+            let version = MenuItem::with_id(
+                app,
+                "version",
+                mwm_core::status::version_item_label(
+                    env!("CARGO_PKG_VERSION"),
+                    build_time(),
+                    chrono::Local::now().date_naive(),
+                ),
+                false,
+                None::<&str>,
+            )?;
+            let menu = Menu::with_items(app, &[&state, &grant, &quit, &version])?;
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
             // старте, и меню у него нет: в строке меню было видно два значка,

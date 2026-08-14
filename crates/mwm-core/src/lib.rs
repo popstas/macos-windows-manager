@@ -10,3 +10,4 @@ pub mod permissions;
 pub mod request;
 pub mod snapshots;
 pub mod state;
+pub mod status;

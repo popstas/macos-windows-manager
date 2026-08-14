@@ -1868,6 +1868,7 @@ version = "0.1.0"
 dependencies = [
  "accessibility",
  "accessibility-sys",
+ "chrono",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "mwm-core",
@@ -1978,6 +1979,7 @@ dependencies = [
 name = "mwm-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "serde_yaml",

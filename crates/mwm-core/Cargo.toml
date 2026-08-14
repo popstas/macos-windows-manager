@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# Подпись сборки в трее: «сегодня» и «раньше» пишутся по-разному, а для этого
+# нужен календарь с локальной зоной — в std его нет. Новых крейтов зависимость
+# не тянет: chrono уже в дереве, её приводит за собой tauri.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
