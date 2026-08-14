@@ -48,6 +48,15 @@ fn load_config() -> Config {
 fn run_tracker(status: Status) {
     let cfg = load_config();
     let mut tracker = Tracker::new(2);
+    // Слоты с прошлого запуска — до первого такта: иначе первое же окно
+    // завело бы слот заново, и запомненное место было бы потеряно ровно тогда,
+    // когда оно нужно.
+    let state_path = std::path::PathBuf::from(&cfg.state_path);
+    tracker.load_slots(mwm_core::state::read_state(&state_path));
+    let snapshots_path = std::path::PathBuf::from(&cfg.snapshots_path);
+    let mut snaps = load_snapshots(&snapshots_path);
+    let mut pending_key = String::new();
+    let mut pending_since_ms = 0u64;
     let mut registry = ax::Registry::default();
     let mut cache = dump::Cache::default();
     let link = mqtt::spawn(&cfg.mqtt);
@@ -98,6 +107,18 @@ fn run_tracker(status: Status) {
         let wanted = !tracker.unresolved().is_empty();
         let index = cache.get(&cfg, now, wanted).clone();
         tracker.tick(&seen, &index, now);
+        // Расстановка — здесь и только здесь: реестр окон не `Send` и живёт в
+        // этом потоке. Клампинг считается в момент расстановки, а не при
+        // запоминании: экраны могли смениться, пока сессия была закрыта.
+        let screens = ax::displays();
+        for (window_id, want) in tracker.placements() {
+            let target = mwm_core::geometry::clamp_to_displays(want, &screens);
+            if let Err(e) = ax::place(&registry, window_id, target) {
+                // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
+                eprintln!("mwm: place failed: {e}");
+                *status.0.lock().unwrap() = format!("place failed: {e}");
+            }
+        }
         let bound = tracker.bound();
         // Сессия ↔ окно. Заголовок — единственное, что есть у обоих списков:
         // `Seen` знает номер окна, `Bound` — сессию, и оба знают, как окно
@@ -112,6 +133,44 @@ fn run_tracker(status: Status) {
                 window_of.insert(sid.clone(), w.id);
             }
         }
+        // Снимок раскладки. Дорогого тут нет: пока состав не менялся и
+        // координаты те же, всё сводится к склейке строки из id сессий.
+        let open = tracker.open_session_ids();
+        let key = mwm_core::snapshots::composition_key(&open);
+        let last_key = snaps
+            .first()
+            .map(|s| {
+                mwm_core::snapshots::composition_key(
+                    &s.sessions.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        let decision = mwm_core::snapshots::decide(
+            &key, &last_key, &pending_key, pending_since_ms, now, cfg.snapshots_debounce_ms,
+        );
+        (pending_key, pending_since_ms) =
+            mwm_core::snapshots::track_composition(&key, &pending_key, pending_since_ms, now);
+        if let Some(d) = decision {
+            let sessions = mwm_core::snapshots::sessions_of(&open, &tracker.slots_state());
+            if !sessions.is_empty() {
+                snaps = match d {
+                    mwm_core::snapshots::Decision::Append => mwm_core::snapshots::append(
+                        std::mem::take(&mut snaps),
+                        mwm_core::snapshots::snapshot_id(now / 1000),
+                        sessions,
+                        now / 1000,
+                        cfg.snapshots_keep,
+                    ),
+                    mwm_core::snapshots::Decision::Update => mwm_core::snapshots::update_last(
+                        std::mem::take(&mut snaps),
+                        sessions,
+                        now / 1000,
+                    ),
+                };
+                save_snapshots(&snapshots_path, &snaps);
+            }
+        }
+
         let print = fingerprint(&bound, link.is_live());
 
         // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
@@ -125,8 +184,26 @@ fn run_tracker(status: Status) {
             .as_deref()
             .map(|e| format!("; index fetch failed: {e}"));
 
+        // Файл состояния пишется с `fsync`, и писать его на каждом такте —
+        // плата за то, что не изменилось.
+        if tracker.take_dirty() {
+            if let Err(e) = mwm_core::state::write_atomic(
+                &state_path,
+                &mwm_core::state::state_json(&tracker.slots_state()),
+            ) {
+                eprintln!("mwm: state write failed: {e}");
+            }
+        }
+
         if should_write(&print, last_print.as_deref(), last_write_ms, now) {
-            let payload = build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &[]);
+            // Снимки едут в build_file, но в fingerprint не входят: тот их не
+            // видит, и should_write не отличит «появился снимок» от «ничего не
+            // изменилось». Решение — оставить как есть: HEARTBEAT_MS (полминуты)
+            // перепишет файл не позже чем через полминуты, а снимок, чтобы
+            // родиться, отстоял минуту дебаунса, — опоздание вдвое меньше того,
+            // что уже потрачено на его рождение.
+            let payload =
+                build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &snaps);
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
@@ -150,6 +227,80 @@ fn run_tracker(status: Status) {
             // отпечаток не сдвинется).
             *status.0.lock().unwrap() = format!("{} windows tracked{note}", bound.len());
         }
+    }
+}
+
+/// Снимки с диска. Формат — тот же, что уезжает в файле окон, и разбирается он
+/// здесь же: заводить ради него отдельный модуль значило бы держать два места,
+/// где знают одну структуру.
+fn load_snapshots(path: &std::path::Path) -> Vec<mwm_core::snapshots::Snapshot> {
+    use mwm_core::geometry::Bounds;
+    use mwm_core::snapshots::{Snapshot, SnapshotSession};
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        eprintln!("mwm: broken snapshots file, starting empty");
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for s in v.get("snapshots").and_then(|x| x.as_array()).into_iter().flatten() {
+        let Some(id) = s.get("id").and_then(|x| x.as_str()).filter(|x| !x.is_empty()) else {
+            continue;
+        };
+        let num = |k: &str| s.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let mut sessions = Vec::new();
+        for m in s.get("sessions").and_then(|x| x.as_array()).into_iter().flatten() {
+            let Some(sid) = m.get("id").and_then(|x| x.as_str()).filter(|x| !x.is_empty()) else {
+                continue;
+            };
+            let b = m.get("bounds").and_then(|x| x.as_object());
+            let n = |k: &str| {
+                b.and_then(|o| o.get(k)).and_then(|x| x.as_i64()).and_then(|x| i32::try_from(x).ok())
+            };
+            let (Some(x), Some(y), Some(width), Some(height)) =
+                (n("x"), n("y"), n("width"), n("height"))
+            else {
+                continue;
+            };
+            let text = |k: &str| {
+                m.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+            };
+            sessions.push(SnapshotSession {
+                id: sid.to_string(),
+                title: text("title"),
+                cwd: text("cwd"),
+                bounds: Bounds { x, y, width, height },
+            });
+        }
+        out.push(Snapshot {
+            id: id.to_string(),
+            created_s: num("created"),
+            updated_s: num("updated"),
+            sessions,
+        });
+    }
+    out
+}
+
+fn save_snapshots(path: &std::path::Path, snaps: &[mwm_core::snapshots::Snapshot]) {
+    let value = serde_json::json!({
+        "version": 1,
+        "snapshots": snaps.iter().map(|s| serde_json::json!({
+            "id": s.id,
+            "created": s.created_s,
+            "updated": s.updated_s,
+            "sessions": s.sessions.iter().map(|m| serde_json::json!({
+                "id": m.id,
+                "title": m.title,
+                "cwd": m.cwd,
+                "bounds": {
+                    "x": m.bounds.x, "y": m.bounds.y,
+                    "width": m.bounds.width, "height": m.bounds.height
+                },
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    if let Err(e) = mwm_core::state::write_atomic(path, &value) {
+        eprintln!("mwm: snapshots write failed: {e}");
     }
 }
 
