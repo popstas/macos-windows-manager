@@ -115,6 +115,11 @@ pub fn sessions_of(open: &[String], slots: &BTreeMap<String, SlotState>) -> Vec<
 }
 
 /// Новый снимок в голову списка, лишние вытесняются с хвоста.
+///
+/// `keep == 0` читается как «настройки нет», а не как «не хранить ничего», —
+/// подставляется умолчание `KEEP`. Числом хранимых снимков снимки не
+/// выключают: человек угадывал бы этот способ, а не читал его, а
+/// выключения снимков на этом этапе нет вовсе.
 pub fn append(
     snapshots: Vec<Snapshot>,
     id: String,
@@ -297,6 +302,16 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].id, "3");
         assert_eq!(got[1].id, "1", "вытеснился самый старый");
+    }
+
+    #[test]
+    fn a_zero_keep_is_read_as_no_setting_not_as_keep_nothing() {
+        // Ноль тут — признак незаполненного значения, а не способ выключить
+        // снимки числом хранимых: угадывать такой особый случай было бы
+        // легче, чем прочитать его в списке.
+        let old = vec![snap("1", 100, vec![session(A, 0)]), snap("2", 90, vec![session(B, 0)])];
+        let got = append(old, "3".to_string(), vec![session(A, 5)], 200, 0);
+        assert_eq!(got.len(), 3, "нулём список не обнулился, взято умолчание KEEP");
     }
 
     #[test]
