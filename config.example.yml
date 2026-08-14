@@ -22,6 +22,38 @@ terminals:
   - com.mitchellh.ghostty
   - com.googlecode.iterm2
 
+# Broker through which requests to raise a window and to mark a session unread
+# arrive. Without this block the tracker works as before — it lists windows and
+# writes its file — but it neither subscribes nor announces that it can raise a
+# window.
+#
+# Both `host` and `base` are needed for the broker to count as configured:
+# without the second there is nowhere to subscribe, and guessing someone else's
+# prefix is not allowed.
+#
+# The password lives here rather than arriving from somewhere else: the tray has
+# neither a frontend nor command-line arguments, and argv is visible in the
+# process list.
+# mqtt:
+#   host: broker.lan
+#   # Default 1883.
+#   port: 8883
+#   user: picker
+#   password: secret
+#   # Topic prefix of this machine; the subscription goes to `<base>/#`. It has
+#   # to differ between machines: the same base on the Mac and on the Windows
+#   # box would collide their subscriptions, and a request addressed to one
+#   # would go off to be carried out by the other.
+#   #
+#   # This is NOT the same value as `mqtt.base` in the picker's config, and
+#   # copying one into the other is wrong. There `base` is the bare machine
+#   # prefix (say, `home/room/mac`), to which the picker itself appends
+#   # `/windows` when addressing the tracker. Here it is the full address with
+#   # that tail already on it, taken as is. The picker's value copied unchanged
+#   # would subscribe the Mac to someone else's prefix — it would start hearing
+#   # requests addressed to the Windows box.
+#   base: home/room/mac/windows
+
 # Poll interval in milliseconds when the window is visible.
 # tickMs: 1000
 
