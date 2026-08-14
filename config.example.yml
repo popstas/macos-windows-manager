@@ -22,6 +22,27 @@ terminals:
   - com.mitchellh.ghostty
   - com.googlecode.iterm2
 
+# Feature switches. Every one of them defaults to on: a config written before
+# this block existed must keep behaving exactly as it did.
+#
+# The settings window (Settings in the tray menu) writes them here. Editing by
+# hand works the same way, and takes effect on the next tick — the tracker
+# rereads them as it goes.
+#
+# All three concern terminal windows only, the ones listed in `terminals` above.
+# features:
+#   # Put an appearing window back where its session had it last time.
+#   # Switched off, remembered places keep being recorded, so switching it back
+#   # on resumes placing windows that appear after that.
+#   placement: true
+#   # Keep layout snapshots (the ^S list in the picker).
+#   snapshots: true
+#   # Serve requests arriving over MQTT: raise a window, mark a session unread.
+#   # Switched off, the tracker also stops announcing `focus` in its window
+#   # file — a picker that offers Enter and does nothing is worse than a
+#   # terminal opened by hand.
+#   requests: true
+
 # Broker through which requests to raise a window and to mark a session unread
 # arrive. Without this block the tracker works as before — it lists windows and
 # writes its file — but it neither subscribes nor announces that it can raise a

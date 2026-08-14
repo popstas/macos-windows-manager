@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>macos-windows-manager Settings</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 18px 22px;
+    font: 13px -apple-system, system-ui, sans-serif;
+    background: #1c1c1e; color: #e6e6e6;
+  }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+  .field { margin-bottom: 10px; }
+  .hint { color: #999; margin-top: 3px; }
+  .note { color: #999; margin: 0 0 12px; }
+  #status { color: #999; margin-left: 10px; }
+  #status.bad { color: #ff7b72; }
+</style>
+</head>
+<body>
+<h2>Features</h2>
+<p class="note" id="scope"></p>
+<div id="features"></div>
+<button id="save">Save</button><span id="status"></span>
+<script>
+(async function () {
+  const invoke = (cmd, args) => (window.__TAURI__
+    ? window.__TAURI__.core.invoke(cmd, args)
+    : Promise.resolve());
+
+  const FLAGS = [
+    ['placement', 'Place windows where they were',
+      'When a session’s window shows up again, put it back where that session '
+      + 'had it last time. Switched off, windows stay where the system opened them; '
+      + 'remembered places keep being recorded, so switching it back on resumes '
+      + 'placing windows that appear after that.'],
+    ['snapshots', 'Keep layout snapshots',
+      'Record which sessions were open and where, so the picker can bring a whole '
+      + 'layout back (the ^S list). Switched off, no new snapshots are written and '
+      + 'the ones already recorded stop being published.'],
+    ['requests', 'Serve raise and unread requests over MQTT',
+      'Let the picker ask this machine to raise a window or mark a session unread. '
+      + 'Switched off, the tracker also stops announcing that it can — the picker '
+      + 'offers no Enter instead of offering one that does nothing.'],
+  ];
+
+  // Имена вместо bundle id: в конфиге они машинные, а читает окно человек.
+  // Незнакомый id показывается как есть — список правится руками, и врать про
+  // него нечем.
+  const TERMINAL_NAMES = {
+    'com.googlecode.iterm2': 'iTerm2',
+    'net.kovidgoyal.kitty': 'kitty',
+    'com.mitchellh.ghostty': 'Ghostty',
+    'com.apple.Terminal': 'Terminal',
+  };
+  const status = document.getElementById('status');
+  let loaded = {};
+
+  const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+  function render(file) {
+    document.getElementById('features').innerHTML = FLAGS.map(([key, label, about]) => {
+      // Пусто в файле значит «включено»: тот же ответ, что даёт parse_config.
+      const on = (file.features || {})[key] !== false;
+      return `<div class="field"><label title="${escape(about)}">
+        <input type="checkbox" id="f-${key}" ${on ? 'checked' : ''}> ${label}
+      </label></div>`;
+    }).join('');
+  }
+
+  // Список берётся из действующего конфига, а не из константы: терминалы в нём
+  // правятся руками, и окно обязано называть те, которые эта машина и правда
+  // считает терминалами.
+  function renderScope(effective) {
+    const ids = (effective || {}).terminals || [];
+    const names = ids.map((id) => TERMINAL_NAMES[id] || id);
+    document.getElementById('scope').textContent = names.length
+      ? `Terminal windows only: ${names.join(', ')}. Other applications are left alone.`
+      : 'Terminal windows only.';
+  }
+
+  async function load() {
+    const out = await invoke('load_settings') || {};
+    loaded = out.file || {};
+    render(loaded);
+    renderScope(out.effective);
+  }
+
+  document.getElementById('save').addEventListener('click', async () => {
+    // Патч только из тронутого: иначе умолчания впечатывались бы в файл
+    // человеку, который их не выбирал.
+    const patch = {};
+    const features = {};
+    for (const [key] of FLAGS) {
+      const now = document.getElementById(`f-${key}`).checked;
+      const was = (loaded.features || {})[key] !== false;
+      if (now !== was) features[key] = now;
+    }
+    if (Object.keys(features).length) patch.features = features;
+    if (!Object.keys(patch).length) { status.textContent = 'nothing changed'; return; }
+    try {
+      await invoke('save_settings', { patch });
+      status.className = '';
+      status.textContent = 'saved';
+      await load();
+    } catch (e) {
+      status.className = 'bad';
+      status.textContent = String(e);
+    }
+  });
+
+  await load();
+})();
+</script>
+</body>
+</html>

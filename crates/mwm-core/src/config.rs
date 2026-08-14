@@ -24,6 +24,27 @@ impl MqttConfig {
     }
 }
 
+/// Что трекеру разрешено делать.
+///
+/// Всё включено по умолчанию, и это не вкусовщина: блока `features:` нет ни в
+/// одном конфиге, который уже лежит на маках, и появление флагов не имеет права
+/// ничего у них выключить.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Features {
+    /// Ставить ли появившееся окно на запомненное место.
+    pub placement: bool,
+    /// Вести ли снимки раскладки.
+    pub snapshots: bool,
+    /// Исполнять ли просьбы, приехавшие по MQTT.
+    pub requests: bool,
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Self { placement: true, snapshots: true, requests: true }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Машина, где живут сессии и агрегатор. Умолчания нет намеренно.
@@ -49,6 +70,8 @@ pub struct Config {
     pub snapshots_path: String,
     pub snapshots_keep: usize,
     pub snapshots_debounce_ms: u64,
+    /// Выключатели фич. Пустой блок значит «всё включено».
+    pub features: Features,
 }
 
 /// Разобрать конфиг, подставив умолчания всему, чего в нём нет.
@@ -187,6 +210,21 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         .and_then(|v| v.as_u64())
         .unwrap_or(crate::snapshots::DEBOUNCE_MS);
 
+    // Флаги читаются по одному, а не структурой целиком: нечитаемое значение
+    // одного не должно включать обратно два соседних, которые человек выключил
+    // осознанно.
+    let features_map = map
+        .get("features")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let flag = |key: &str| features_map.get(key).and_then(|v| v.as_bool()).unwrap_or(true);
+    let features = Features {
+        placement: flag("placement"),
+        snapshots: flag("snapshots"),
+        requests: flag("requests"),
+    };
+
     Config {
         ssh_host,
         remote_dir,
@@ -199,7 +237,45 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         snapshots_path,
         snapshots_keep,
         snapshots_debounce_ms,
+        features,
     }
+}
+
+/// Конфиг как его увидит окно настроек.
+///
+/// Ключи — те же, что читает `parse_config`, и круговой тест это сторожит:
+/// окно показывает человеку действующие значения, и разъехавшееся имя ключа
+/// означало бы, что показано не то, что подхвачено.
+///
+/// Пароля здесь нет намеренно. Он едет только в одну сторону — от человека в
+/// файл; форма показывает пустое поле и шлёт его, лишь когда в него что-то
+/// ввели.
+pub fn to_json(cfg: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "sshHost": cfg.ssh_host,
+        "remoteDir": cfg.remote_dir,
+        "windowHost": cfg.host,
+        "terminals": cfg.terminals,
+        "tickMs": cfg.tick_ms,
+        "dumpCacheMs": cfg.dump_cache_ms,
+        "mqtt": {
+            "host": cfg.mqtt.host,
+            "port": cfg.mqtt.port,
+            "user": cfg.mqtt.user,
+            "base": cfg.mqtt.base,
+        },
+        "state": {
+            "path": cfg.state_path,
+            "snapshotsPath": cfg.snapshots_path,
+            "keep": cfg.snapshots_keep,
+            "debounceMs": cfg.snapshots_debounce_ms,
+        },
+        "features": {
+            "placement": cfg.features.placement,
+            "snapshots": cfg.features.snapshots,
+            "requests": cfg.features.requests,
+        },
+    })
 }
 
 /// Где лежит конфиг. Тот же вид пути, что у пикера, — человеку их настраивать
@@ -420,5 +496,64 @@ mod tests {
         let c = parse_config("state:\n  path: /tmp/s.json\n  keep: \"не число\"\n", "mac-host");
         assert_eq!(c.state_path, "/tmp/s.json");
         assert_eq!(c.snapshots_keep, 20);
+    }
+
+    #[test]
+    fn features_are_all_on_when_the_block_is_missing() {
+        // Конфиги, которые уже лежат на маках, обязаны вести себя ровно как
+        // раньше: блока `features:` в них нет и не будет, пока человек его не
+        // напишет.
+        let c = parse_config("sshHost: remote-host\n", "mac-host");
+        assert_eq!(c.features, Features { placement: true, snapshots: true, requests: true });
+    }
+
+    #[test]
+    fn features_are_read() {
+        let c = parse_config(
+            "features:\n  placement: false\n  snapshots: false\n  requests: false\n",
+            "mac-host",
+        );
+        assert_eq!(c.features, Features { placement: false, snapshots: false, requests: false });
+    }
+
+    #[test]
+    fn junk_in_one_feature_does_not_cost_the_others() {
+        // То же правило, что у остальных полей конфига: опечатка стоит поля, а
+        // не всех настроек. Выключить человек хотел одно, и выключиться должно
+        // ровно одно.
+        let c = parse_config("features:\n  placement: \"нет\"\n  snapshots: false\n", "mac-host");
+        assert!(c.features.placement, "нечитаемый флаг остаётся включённым");
+        assert!(!c.features.snapshots);
+        assert!(c.features.requests);
+    }
+
+    #[test]
+    fn features_not_a_mapping_leaves_everything_on() {
+        let c = parse_config("features: \"да\"\n", "mac-host");
+        assert_eq!(c.features, Features::default());
+    }
+
+    #[test]
+    fn to_json_uses_the_keys_parse_config_reads() {
+        // Круговой тест: окно настроек показывает `to_json`, а трекер читает
+        // `parse_config`. Разойдись они в имени хоть одного ключа — окно
+        // показывало бы не то, что подхвачено, и заметить это можно было бы
+        // только глазами на маке.
+        let src = parse_config(
+            "sshHost: remote-host\nremoteDir: /custom\nwindowHost: my-mac\ntickMs: 5000\ndumpCacheMs: 30000\nterminals:\n  - com.apple.Terminal\nmqtt:\n  host: broker.lan\n  port: 8883\n  user: picker\n  base: home/room/mac/windows\nfeatures:\n  snapshots: false\n",
+            "mac-host",
+        );
+        let text = serde_yaml::to_string(&to_json(&src)).unwrap();
+        assert_eq!(parse_config(&text, "mac-host"), src);
+    }
+
+    #[test]
+    fn to_json_never_carries_the_password() {
+        // Пароль уезжает в окно настроек только в одну сторону — от человека к
+        // файлу. Показать его форме значило бы разложить его по webview и по
+        // истории IPC ради поля, которое и так не показывается.
+        let c = parse_config("mqtt:\n  host: broker.lan\n  password: secret\n", "mac-host");
+        let text = serde_json::to_string(&to_json(&c)).unwrap();
+        assert!(!text.contains("secret"), "{text}");
     }
 }
