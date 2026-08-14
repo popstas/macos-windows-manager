@@ -4,7 +4,7 @@ use crate::geometry::Bounds;
 use crate::index::SessionRef;
 use crate::state::SlotState;
 use crate::title::strip_decoration;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 /// Окно, каким его увидел платформенный слой на этом такте.
 #[derive(Debug, Clone)]
@@ -42,6 +42,13 @@ struct Tracked {
     /// оказаться уже накоплена.
     pending: Option<Bounds>,
     pending_ticks: u32,
+    /// Расстановка предлагается окну ровно один раз за его жизнь — на том
+    /// такте, когда для него наконец нашёлся слот, а не на том, когда оно
+    /// впервые попало в список: заголовок и сессия могут устояться на такты
+    /// позже появления самого окна. Ставится при заведении записи в `tick` —
+    /// `true`, если трекер уже работал (иначе окно было открыто до него и
+    /// расстановки не заслужило), `false` для перезапуска намеренно.
+    awaiting_placement: bool,
 }
 
 /// Слот переживает закрытие окна: он затем и заведён, чтобы вернуть сессию на
@@ -65,8 +72,6 @@ pub struct Tracker {
     slots: HashMap<String, Slot>,
     bound: BTreeMap<String, Bound>,
     unresolved: Vec<String>,
-    /// Окна прошлого такта: по ним и только по ним видно, что окно появилось.
-    prev_ids: HashSet<u64>,
     /// Первый такт после запуска не расставляет ничего. Отдельное правило, а не
     /// следствие: на первом такте прошлого такта нет, и все открытые окна
     /// выглядят только что появившимися.
@@ -83,7 +88,6 @@ impl Tracker {
             slots: HashMap::new(),
             bound: BTreeMap::new(),
             unresolved: Vec::new(),
-            prev_ids: HashSet::new(),
             started: false,
             placements: Vec::new(),
             dirty: false,
@@ -107,13 +111,23 @@ impl Tracker {
         self.bound.clear();
         self.unresolved.clear();
         self.placements.clear();
-        let appeared_ok = self.started;
-        let prev: HashSet<u64> = std::mem::take(&mut self.prev_ids);
-        self.prev_ids = seen.iter().map(|w| w.id).collect();
+        // `started` смотрим до того, как выставим его в true чуть ниже: этим
+        // же значением заводимые в этом такте окна решают, заслужили ли они
+        // предложение расстановки.
+        let started_before = self.started;
         self.started = true;
 
         for w in seen {
+            let is_new_window = !self.windows.contains_key(&w.id);
             let t = self.windows.entry(w.id).or_default();
+            if is_new_window {
+                // Окно появилось только что. Если трекер уже работал —
+                // заслужило одно предложение расстановки, когда бы для него
+                // ни нашёлся слот. Если это первый такт после запуска —
+                // предложения не будет никогда: все окна, видимые тогда, были
+                // открыты не трекером, и правило 2 требует их не трогать.
+                t.awaiting_placement = started_before;
+            }
             if t.title == w.title {
                 t.ticks += 1;
             } else {
@@ -157,7 +171,6 @@ impl Tracker {
                 self.unresolved.push(key.clone());
             }
             let Some(sid) = t.session_id.clone() else { continue };
-            let appeared = appeared_ok && !prev.contains(&w.id);
             let slot = self.slots.entry(sid.clone()).or_default();
             if w.focused && slot.focused_at_ms != now_ms {
                 slot.focused_at_ms = now_ms;
@@ -184,14 +197,23 @@ impl Tracker {
             }
             // Расстановка спрашивается до того, как слот примет нынешние
             // координаты: иначе он ответил бы «окно уже там, где нужно».
-            if appeared {
+            // Слот без координат предложения не порождает — двигать некуда —
+            // но окно его всё равно истратило: второго раза не будет.
+            let mut just_placed = false;
+            if t.awaiting_placement {
+                t.awaiting_placement = false;
                 if let (Some(want), Some(now_at)) = (slot.bounds, w.bounds) {
                     if want != now_at {
                         self.placements.push((w.id, want));
+                        just_placed = true;
                     }
                 }
             }
-            if t.pending_ticks >= self.stable_ticks {
+            // Такт, на котором расстановка только что запрошена, ничего не
+            // подтверждает: окно физически ещё стоит на прежнем (нынешнем для
+            // такта) месте, и это устаревшее значение не должно затереть
+            // память слота раньше, чем просьба дойдёт до платформы.
+            if !just_placed && t.pending_ticks >= self.stable_ticks {
                 if let Some(b) = t.pending {
                     if slot.bounds != Some(b) {
                         slot.bounds = Some(b);
@@ -572,6 +594,102 @@ mod tests {
         assert_eq!(t.placements().len(), 1);
         t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 3_000);
         assert!(t.placements().is_empty(), "окно уже было в прошлом такте");
+    }
+
+    #[test]
+    fn a_delayed_placement_leaves_the_remembered_bounds_untouched() {
+        // Боевая настройка — stable_ticks = 2 (src-tauri/src/main.rs). Заголовок
+        // окна устаивается не на том же такте, на котором оно появилось, а
+        // слот находится только вместе с заголовком. Расстановка обязана всё
+        // равно случиться — и не потерять память слота на том же такте: окно
+        // физически ещё стоит на старом (для трекера — «нынешнем») месте, и
+        // это устаревшее значение не должно затереть то, что мы только что
+        // попросили вернуть.
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        // Такт 2: окно появилось, заголовку ещё не хватило тактов на устойчивость.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert!(t.placements().is_empty(), "заголовок ещё не устоялся — слота не нашли");
+        // Такт 3: заголовок устоялся, слот найден — вот когда уходит просьба.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 3_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))], "расстановка случилась ровно один раз");
+        assert_eq!(
+            t.slots_state()[SID].bounds,
+            Some(rect(100, 100)),
+            "координаты ещё не затёрты нынешним (устаревшим) положением окна",
+        );
+    }
+
+    #[test]
+    fn a_placement_is_offered_once_the_title_finally_resolves() {
+        // Вход в сессию идёт через заголовок шелла: сперва он не значит
+        // ничего для дампа, потом становится именем сессии. Слот находится не
+        // на том такте, когда окно появилось, а на том, когда заголовок
+        // наконец назвал сессию, — и предложение обязано дождаться именно
+        // этого такта, а не сгореть раньше.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        // Окно открылось с заголовком шелла — сессии под таким именем нет.
+        t.tick(&[seen_at(1, "zsh", rect(700, 700))], &idx, 2_000);
+        assert!(t.placements().is_empty(), "заголовок ещё не сессии — слота не нашли");
+        // Заголовок сменился на имя сессии — вот когда предложение и уходит.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 3_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))]);
+    }
+
+    #[test]
+    fn a_window_open_before_the_tracker_started_never_gets_an_offer() {
+        // Правило 2 в новой форме: признак «предложение положено» живёт на
+        // окне и не гаснет сам собой. Не запрети его такт запуска навсегда —
+        // а лишь пропусти этот конкретный такт, — устоявшийся на такт позже
+        // заголовок пробил бы в правиле дыру: окно, открытое до трекера,
+        // получило бы расстановку, как только дамп наконец назвал его сессию.
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        // Окно уже открыто на самом первом такте — трекер его не открывал.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert!(t.placements().is_empty(), "окно старше трекера — расстановки не будет никогда");
+    }
+
+    #[test]
+    fn a_reopened_window_gets_its_own_placement_offer() {
+        // Закрытое и вновь открытое окно — новый id, и своё предложение оно
+        // получает заново: истраченный признак прошлого окна не должен
+        // украсть его у следующего, даже когда оба ведут в один слот.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        // Окно 1 появилось, получило и истратило предложение.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))]);
+        // Окно закрылось.
+        t.tick(&[], &idx, 3_000);
+        // На его месте открылось новое — другой id, та же сессия по заголовку.
+        t.tick(&[seen_at(2, "ccfzf", rect(900, 900))], &idx, 4_000);
+        assert_eq!(t.placements(), vec![(2, rect(100, 100))], "новое окно — своё предложение");
     }
 
     #[test]
