@@ -7,4 +7,5 @@ pub mod config;
 pub mod geometry;
 pub mod index;
 pub mod request;
+pub mod snapshots;
 pub mod state;
