@@ -126,7 +126,7 @@ fn run_tracker(status: Status) {
             .map(|e| format!("; index fetch failed: {e}"));
 
         if should_write(&print, last_print.as_deref(), last_write_ms, now) {
-            let payload = build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base);
+            let payload = build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &[]);
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);

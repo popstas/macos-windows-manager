@@ -42,6 +42,13 @@ pub struct Config {
     /// Брокер просьб. Пустой блок значит «просьб не будет», и тогда трекер не
     /// объявляет умения поднимать окно.
     pub mqtt: MqttConfig,
+    /// Где лежат слоты сессий. Не рядом с конфигом намеренно: конфиг человек
+    /// правит руками, состояние пишет машина, и соседство приглашает спутать
+    /// резервную копию одного с рабочим файлом другого.
+    pub state_path: String,
+    pub snapshots_path: String,
+    pub snapshots_keep: usize,
+    pub snapshots_debounce_ms: u64,
 }
 
 /// Разобрать конфиг, подставив умолчания всему, чего в нём нет.
@@ -52,6 +59,12 @@ pub struct Config {
 /// Парсит каждое поле независимо: если одно поле неправильного типа, остальные
 /// остаются нетронутыми, только это поле получает умолчание.
 pub fn parse_config(text: &str, hostname: &str) -> Config {
+    // `HOME` на маке выставлен всегда — в отличие от Windows, где `load_config`
+    // в пикере знает про запасной `USERPROFILE`. Пустая строка дала бы
+    // относительный путь, и это заметили бы на первом же запуске: файл лёг бы
+    // рядом с бинарём.
+    let home = std::env::var("HOME").unwrap_or_default();
+
     // Разобрать документ один раз в Value; если текст не парсится, использовать пустой mapping.
     let value: serde_yaml::Value = serde_yaml::from_str(text)
         .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
@@ -146,6 +159,34 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         base: mqtt_text("base").trim_end_matches('/').to_string(),
     };
 
+    let state_map = map
+        .get("state")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let state_text = |key: &str| {
+        state_map.get(key).and_then(|v| v.as_str()).unwrap_or_default().trim().to_string()
+    };
+    let state_dir = format!("{home}/.local/state/macos-windows-manager");
+    let state_path = {
+        let p = state_text("path");
+        if p.is_empty() { format!("{state_dir}/state.json") } else { p }
+    };
+    let snapshots_path = {
+        let p = state_text("snapshotsPath");
+        if p.is_empty() { format!("{state_dir}/snapshots.json") } else { p }
+    };
+    let snapshots_keep = state_map
+        .get("keep")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(crate::snapshots::KEEP);
+    let snapshots_debounce_ms = state_map
+        .get("debounceMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(crate::snapshots::DEBOUNCE_MS);
+
     Config {
         ssh_host,
         remote_dir,
@@ -154,6 +195,10 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         tick_ms,
         dump_cache_ms,
         mqtt,
+        state_path,
+        snapshots_path,
+        snapshots_keep,
+        snapshots_debounce_ms,
     }
 }
 
@@ -343,5 +388,37 @@ mod tests {
         let c = parse_config("sshHost: remote-host\nmqtt: \"not-a-map\"\n", "mac-host");
         assert_eq!(c.ssh_host, "remote-host");
         assert!(!c.mqtt.is_configured());
+    }
+
+    #[test]
+    fn state_paths_have_defaults() {
+        // Трекер обязан работать с конфигом, в котором про состояние не сказано
+        // ни слова: этап 3 добавил файлы, а конфиги у людей остались прежние.
+        let c = parse_config("sshHost: remote-host\n", "mac-host");
+        assert!(c.state_path.ends_with("macos-windows-manager/state.json"), "{}", c.state_path);
+        assert!(c.snapshots_path.ends_with("macos-windows-manager/snapshots.json"), "{}", c.snapshots_path);
+        assert_eq!(c.snapshots_keep, 20);
+        assert_eq!(c.snapshots_debounce_ms, 60_000);
+    }
+
+    #[test]
+    fn state_paths_can_be_moved() {
+        let c = parse_config(
+            "state:\n  path: /tmp/s.json\n  snapshotsPath: /tmp/snap.json\n  keep: 3\n  debounceMs: 5000\n",
+            "mac-host",
+        );
+        assert_eq!(c.state_path, "/tmp/s.json");
+        assert_eq!(c.snapshots_path, "/tmp/snap.json");
+        assert_eq!(c.snapshots_keep, 3);
+        assert_eq!(c.snapshots_debounce_ms, 5_000);
+    }
+
+    #[test]
+    fn junk_in_one_state_field_does_not_cost_the_others() {
+        // То же правило, что у остальных полей конфига: опечатка стоит поля, а
+        // не всех настроек.
+        let c = parse_config("state:\n  path: /tmp/s.json\n  keep: \"не число\"\n", "mac-host");
+        assert_eq!(c.state_path, "/tmp/s.json");
+        assert_eq!(c.snapshots_keep, 20);
     }
 }

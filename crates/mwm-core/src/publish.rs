@@ -15,14 +15,15 @@ pub const HEARTBEAT_MS: u64 = 30_000;
 /// него смотрели.
 ///
 /// Формат — тот же, что у Windows-трекера, и это не совпадение, а условие
-/// затеи: читатель уже умеет его разбирать. Отличий пять, и все объявлены.
+/// затеи: читатель уже умеет его разбирать. Отличий четыре, и все объявлены.
 /// `desktop` всегда `null` — программного интерфейса к Spaces у macOS нет.
-/// `snapshots` и `projects` пусты — первое отложено, второе живёт на
-/// Windows-стороне. `focus` говорит, умеет ли этот трекер поднимать окно; на
-/// этом этапе он не умеет, и без такого признания пикер предложил бы человеку
-/// молчащий Enter. `openSession` всегда `false` — терминалы на маке открывает
-/// сам пикер. `mqttBase` называет адрес, на который просить: топик живёт в
-/// конфиге трекера, а публикует читатель.
+/// `projects` пусто — живёт на Windows-стороне. `focus` говорит, умеет ли этот
+/// трекер поднимать окно; на этом этапе он не умеет, и без такого признания
+/// пикер предложил бы человеку молчащий Enter. `openSession` всегда `false` —
+/// терминалы на маке открывает сам пикер. `mqttBase` называет адрес, на
+/// который просить: топик живёт в конфиге трекера, а публикует читатель.
+/// `snapshots` едет этим же файлом, вторая дорога означала бы вторую точку
+/// отказа ради тех же байтов.
 ///
 /// `focus` и `mqttBase` объявляются по-разному, и это не случайный разнобой.
 /// `can_focus` зовущий берёт из `link.is_live()` — обещание «подниму окно»
@@ -47,6 +48,7 @@ pub fn build_file(
     now_ms: u64,
     can_focus: bool,
     mqtt_base: &str,
+    snapshots: &[crate::snapshots::Snapshot],
 ) -> serde_json::Value {
     let mut windows = serde_json::Map::new();
     for (sid, b) in bound {
@@ -60,6 +62,29 @@ pub fn build_file(
             }),
         );
     }
+    let snaps: Vec<serde_json::Value> = snapshots
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "created": s.created_s,
+                "updated": s.updated_s,
+                "sessions": s.sessions.iter().map(|m| json!({
+                    "id": m.id,
+                    "title": m.title,
+                    "cwd": m.cwd,
+                    "bounds": {
+                        "x": m.bounds.x, "y": m.bounds.y,
+                        "width": m.bounds.width, "height": m.bounds.height
+                    },
+                    // Виртуальных столов у macOS программно нет. Ключ есть,
+                    // чтобы читатель разбирал запись тем же кодом, что и
+                    // запись Windows-трекера.
+                    "desktop": serde_json::Value::Null,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     json!({
         "generated": now_ms / 1000,
         "host": host,
@@ -75,7 +100,7 @@ pub fn build_file(
         // прежней версии.
         "mqttBase": mqtt_base,
         "windows": windows,
-        "snapshots": [],
+        "snapshots": snaps,
         "projects": [],
     })
 }
@@ -125,6 +150,8 @@ pub fn should_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Bounds;
+    use crate::snapshots::{Snapshot, SnapshotSession};
     use crate::tracker::Bound;
     use std::collections::BTreeMap;
 
@@ -141,13 +168,60 @@ mod tests {
         m
     }
 
+    fn one_snapshot() -> Vec<Snapshot> {
+        vec![Snapshot {
+            id: "2026-08-14T02-15-30".to_string(),
+            created_s: 1_765_000_000,
+            updated_s: 1_765_000_600,
+            sessions: vec![SnapshotSession {
+                id: SID.to_string(),
+                title: "ccfzf".to_string(),
+                cwd: "~/projects/js/ccfzf-picker".to_string(),
+                bounds: Bounds { x: 10, y: 20, width: 800, height: 600 },
+            }],
+        }]
+    }
+
+    #[test]
+    fn snapshots_travel_in_the_window_file() {
+        // Своей дороги у снимков нет и не заводится: читатель уже разбирает это
+        // поле у Windows-трекера, а второй транспорт означал бы вторую точку
+        // отказа ради тех же байтов.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &one_snapshot());
+        let snaps = v["snapshots"].as_array().unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0]["id"], "2026-08-14T02-15-30");
+        assert_eq!(snaps[0]["created"], 1_765_000_000_u64);
+        assert_eq!(snaps[0]["sessions"][0]["id"], SID);
+        assert_eq!(snaps[0]["sessions"][0]["cwd"], "~/projects/js/ccfzf-picker");
+    }
+
+    #[test]
+    fn a_snapshot_session_carries_its_place() {
+        // Координаты читателю не нужны — восстанавливает их та же машина, что
+        // и сняла. Но в файле они есть: он же и есть хранилище снимков, а
+        // второго у трекера нет.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &one_snapshot());
+        let b = &v["snapshots"][0]["sessions"][0]["bounds"];
+        assert_eq!(b["x"], 10);
+        assert_eq!(b["width"], 800);
+    }
+
+    #[test]
+    fn no_snapshots_is_an_empty_list_not_a_missing_key() {
+        // Отсутствие ключа читатель разберёт как «трекер прежней версии» и
+        // промолчит.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
+        assert!(v["snapshots"].as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn file_shape_matches_what_the_reader_expects() {
         // Формат — тот же, что у Windows-трекера, и это условие всей затеи:
         // читатель уже умеет его разбирать, и переучивать его не пришлось.
         // Время в файле — в секундах: читатель сравнивает `generated` со своим
         // «сейчас», а оно у него в секундах.
-        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "");
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "", &[]);
         assert_eq!(v["host"], "mac-host");
         assert_eq!(v["pid"], 7);
         assert_eq!(v["generated"], 60);
@@ -170,7 +244,7 @@ mod tests {
         // конфиге трекера, а публикует читатель. Поэтому адрес называет тот,
         // кто его знает.
         let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true,
-                           "home/room/mac/windows");
+                           "home/room/mac/windows", &[]);
         assert_eq!(v["mqttBase"], "home/room/mac/windows");
         assert_eq!(v["focus"], true);
     }
@@ -180,7 +254,7 @@ mod tests {
         // Терминалы на маке открывает сам пикер, и это работает. Объявив
         // обратное, трекер увёл бы к себе просьбу `claude-session-open`,
         // которую здесь никто не разбирает, — и Enter замолчал бы.
-        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "");
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
         assert_eq!(v["openSession"], false);
     }
 
@@ -188,7 +262,7 @@ mod tests {
     fn an_unset_broker_leaves_the_address_empty() {
         // Пустая строка читается агрегатором как «спроси свой конфиг» — так
         // себя вёл читатель до появления поля.
-        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "");
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, false, "", &[]);
         assert_eq!(v["mqttBase"], "");
         assert_eq!(v["focus"], false);
     }
