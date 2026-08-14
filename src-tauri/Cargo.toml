@@ -21,6 +21,10 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 accessibility = "0.2"
 accessibility-sys = "0.2"
 core-foundation = "0.10"
+# Версия согласована с той, что тянет сам core-foundation = "0.10" выше (обе
+# 0.24 и 0.25 core-graphics требуют её же) — геометрия окон и список экранов
+# в ax.rs.
+core-graphics = "0.24"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = "0.3"

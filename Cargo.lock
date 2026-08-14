@@ -1869,6 +1869,7 @@ dependencies = [
  "accessibility",
  "accessibility-sys",
  "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
  "mwm-core",
  "objc2",
  "objc2-app-kit",

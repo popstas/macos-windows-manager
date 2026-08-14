@@ -5,21 +5,27 @@
 //! покрыт намеренно — проверять его нечем, кроме той самой машины, на которой
 //! он и работает.
 
+use mwm_core::geometry::{Bounds, Display};
 use mwm_core::tracker::Seen;
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::Seen;
+    use super::{Bounds, Display, Seen};
     // Обёртка `accessibility` поверх `accessibility-sys` берёт на себя ровно
     // то, ради чего пришлось бы писать свой тип: `AXUIElement` там —
     // полноценный CF-тип, а значит `Clone` считает ссылки, а `PartialEq` —
     // это `CFEqual`, то самое «то же самое окно», на котором стоит реестр.
     use accessibility::{AXAttribute, AXUIElement};
     use accessibility_sys::{kAXTrustedCheckOptionPrompt, AXIsProcessTrustedWithOptions};
-    use core_foundation::base::TCFType;
+    use core_foundation::base::{CFType, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
+    // Только геометрия: `CGPoint`/`CGSize` — сырые прямоугольники под AXValue,
+    // `CGDisplay` — список экранов той же (Accessibility) системой координат,
+    // без хождения через AppKit. Подробности — у `displays()` ниже.
+    use core_graphics::display::CGDisplay;
+    use core_graphics::geometry::{CGPoint, CGSize};
     use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 
     /// Секунда на приложение — и это не перестраховка.
@@ -136,8 +142,11 @@ mod imp {
                 // реестре, а их `PartialEq` — `CFEqual`: сравниваем сами
                 // окна, а не то, как они называются.
                 let focused = focused_window.as_ref() == Some(&w);
+                // Геометрия спрашивается до перемещения `w` в `alive` — после
+                // него ссылки уже нет.
+                let bounds = bounds_of(&w);
                 alive.push(w);
-                out.push(Seen { id, focused, title, bounds: None });
+                out.push(Seen { id, focused, title, bounds });
             }
         }
         reg.retain_seen(&alive);
@@ -155,6 +164,61 @@ mod imp {
 
     fn title_of(w: &AXUIElement) -> Option<String> {
         w.attribute(&AXAttribute::title()).ok().map(|t| t.to_string())
+    }
+
+    /// Где стоит окно. Отказ — `None`, а не ошибка: окно могло закрыться между
+    /// перечислением и вопросом, и это норма такта.
+    ///
+    /// Позиция и размер спрашиваются порознь — они и есть два разных атрибута
+    /// Accessibility. Не ответил ни один — координат нет вовсе: половина
+    /// прямоугольника хуже, чем ничего, потому что по ней окно поставили бы
+    /// не туда.
+    ///
+    /// Крейт `accessibility` 0.2.0 не знает ни атрибутов `AXPosition`/`AXSize`,
+    /// ни самого типа `AXValue` вовсе — проверено в исходниках
+    /// (`~/.cargo/registry/src/…/accessibility-0.2.0/src/attribute.rs` и
+    /// `lib.rs`: там нет ни того, ни другого, `define_attributes!` их не
+    /// перечисляет). Это не «разворачивается иначе», как в пробе 1 брифа, а
+    /// «нет вовсе» — сразу проба 3: атрибут строится вручную через
+    /// `AXAttribute::<CFType>::new` (`impl AXAttribute<CFType>` в том же
+    /// `attribute.rs`), а получившийся `AXValue` разбирается руками через
+    /// `accessibility_sys::AXValueGetType`/`AXValueGetValue` — другого пути в
+    /// этой версии крейта нет.
+    fn bounds_of(w: &AXUIElement) -> Option<Bounds> {
+        let p = ax_value_attr(w, accessibility_sys::kAXPositionAttribute)?;
+        let s = ax_value_attr(w, accessibility_sys::kAXSizeAttribute)?;
+        let p: CGPoint = read_ax_value(&p, accessibility_sys::kAXValueTypeCGPoint)?;
+        let s: CGSize = read_ax_value(&s, accessibility_sys::kAXValueTypeCGSize)?;
+        Some(Bounds {
+            x: p.x as i32,
+            y: p.y as i32,
+            width: s.width as i32,
+            height: s.height as i32,
+        })
+    }
+
+    /// Значение AXValue-атрибута как есть, нетипизированным `CFType`: у
+    /// `AXPosition`/`AXSize` в крейте нет типизированной пары, а `CFType`
+    /// принимает любой CF-объект — проверка типа внутри `attribute()`
+    /// пропускается, когда `T::type_id() == CFType::type_id()`.
+    fn ax_value_attr(w: &AXUIElement, name: &'static str) -> Option<CFType> {
+        w.attribute(&AXAttribute::<CFType>::new(&CFString::from_static_string(name)))
+            .ok()
+    }
+
+    /// Сырые байты `CGPoint`/`CGSize` из AXValue. `AXValueGetType` сверяет
+    /// тип значения с ожидаемым — иначе `AXValueGetValue` прочитала бы чужую
+    /// раскладку байт как свою.
+    fn read_ax_value<T: Copy>(v: &CFType, kind: accessibility_sys::AXValueType) -> Option<T> {
+        let value_ref = v.as_concrete_TypeRef() as accessibility_sys::AXValueRef;
+        if unsafe { accessibility_sys::AXValueGetType(value_ref) } != kind {
+            return None;
+        }
+        let mut out = std::mem::MaybeUninit::<T>::uninit();
+        let ok = unsafe {
+            accessibility_sys::AXValueGetValue(value_ref, kind, out.as_mut_ptr() as *mut std::ffi::c_void)
+        };
+        ok.then(|| unsafe { out.assume_init() })
     }
 
     /// Поднять окно и вывести вперёд его приложение.
@@ -199,13 +263,107 @@ mod imp {
         }
         Ok(())
     }
+
+    /// Поставить окно в заданный прямоугольник.
+    ///
+    /// Позиция ставится раньше размера. Порядок не безразличен: некоторые
+    /// приложения ужимают размер под текущий экран, и заданный до переезда он
+    /// обрезался бы по старому месту.
+    ///
+    /// Проверка «атрибут вообще настраиваемый» стоит перед записью: у окна в
+    /// полноэкранном режиме позиция только для чтения, и без проверки отказ
+    /// выглядел бы отказом Accessibility вообще.
+    ///
+    /// Атрибуты и значения собираются так же, как читаются в `bounds_of`:
+    /// типизированной пары для `AXPosition`/`AXSize` в крейте нет, поэтому
+    /// `AXAttribute<CFType>` и ручная сборка AXValue. Метод проверки
+    /// настраиваемости в этой версии крейта называется `is_settable`, а не
+    /// `is_attribute_settable` — так он определён в
+    /// `accessibility-0.2.0/src/ui_element.rs`, проба 2 из брифа (звать
+    /// `accessibility_sys::AXUIElementIsAttributeSettable` напрямую) не
+    /// понадобилась: типизированная обёртка нашлась под другим именем.
+    pub fn place(reg: &Registry, window_id: u64, b: Bounds) -> Result<(), String> {
+        let el = reg
+            .known
+            .iter()
+            .find(|(_, id)| *id == window_id)
+            .map(|(el, _)| el.clone())
+            .ok_or("window is gone")?;
+        let pos = AXAttribute::<CFType>::new(&CFString::from_static_string(
+            accessibility_sys::kAXPositionAttribute,
+        ));
+        if !el.is_settable(&pos).unwrap_or(false) {
+            return Err("window position is read-only (full screen?)".to_string());
+        }
+        let size = AXAttribute::<CFType>::new(&CFString::from_static_string(
+            accessibility_sys::kAXSizeAttribute,
+        ));
+        let p = CGPoint::new(f64::from(b.x), f64::from(b.y));
+        let s = CGSize::new(f64::from(b.width), f64::from(b.height));
+        let pv = make_ax_value(accessibility_sys::kAXValueTypeCGPoint, &p)?;
+        let sv = make_ax_value(accessibility_sys::kAXValueTypeCGSize, &s)?;
+        el.set_attribute(&pos, pv).map_err(|e| format!("set position: {e:?}"))?;
+        el.set_attribute(&size, sv).map_err(|e| format!("set size: {e:?}"))?;
+        Ok(())
+    }
+
+    /// Собрать AXValue из сырых байт `CGPoint`/`CGSize`: крейт `accessibility`
+    /// такой конструктор не даёт (см. `bounds_of` — типа `AXValue` там нет
+    /// вовсе), `AXValueCreate` зовётся из `accessibility_sys` напрямую, как
+    /// уже зовётся `AXUIElementPerformAction` в `raise`.
+    fn make_ax_value<T>(kind: accessibility_sys::AXValueType, v: &T) -> Result<CFType, String> {
+        let raw = unsafe {
+            accessibility_sys::AXValueCreate(kind, (v as *const T).cast())
+        };
+        if raw.is_null() {
+            return Err("AXValueCreate returned null".to_string());
+        }
+        Ok(unsafe { CFType::wrap_under_create_rule(raw as core_foundation::base::CFTypeRef) })
+    }
+
+    /// Экраны в той же системе координат, что и окна.
+    ///
+    /// `NSScreen.frame` считает от левого нижнего угла главного экрана, а
+    /// Accessibility — от левого верхнего, и смешивать их нельзя. Бриф
+    /// предлагал начать с `NSScreen::screens` и перейти на `CGDisplay`, если
+    /// проба упрётся в главный поток. Здесь взят сразу `CGDisplay`, без
+    /// пробы: такт трекера идёт в своём потоке
+    /// (`std::thread::spawn(move || run_tracker(worker))` в `main.rs`), а не
+    /// в главном, `NSScreen` — API главного потока, а `CGDisplay::bounds()`
+    /// его не требует и, по документации в самих исходниках
+    /// (`core-graphics-0.24.0/src/display.rs`: «Returns the bounds of a
+    /// display in the global display coordinate space»), уже отдаёт
+    /// координаты в той же системе, что и Accessibility — переворачивать `y`
+    /// самим не нужно.
+    pub fn displays() -> Vec<Display> {
+        let ids = match CGDisplay::active_displays() {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!("mwm: CGGetActiveDisplayList failed: {e}");
+                return Vec::new();
+            }
+        };
+        ids.into_iter()
+            .map(|id| {
+                let r = CGDisplay::new(id).bounds();
+                Display {
+                    bounds: Bounds {
+                        x: r.origin.x as i32,
+                        y: r.origin.y as i32,
+                        width: r.size.width as i32,
+                        height: r.size.height as i32,
+                    },
+                }
+            })
+            .collect()
+    }
 }
 
 /// На не-macOS модуль отвечает пустотой: крейт должен собираться где угодно,
 /// чтобы `cargo check` был доступен и не на маке.
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use super::Seen;
+    use super::{Bounds, Display, Seen};
     #[derive(Default)]
     pub struct Registry;
     pub fn trusted() -> bool { false }
@@ -214,6 +372,10 @@ mod imp {
     pub fn raise(_reg: &Registry, _window_id: u64) -> Result<(), String> {
         Err("raise is available on macOS only".to_string())
     }
+    pub fn place(_reg: &Registry, _window_id: u64, _b: Bounds) -> Result<(), String> {
+        Err("placing windows is available on macOS only".to_string())
+    }
+    pub fn displays() -> Vec<Display> { Vec::new() }
 }
 
-pub use imp::{list_windows, prompt_for_trust, raise, trusted, Registry};
+pub use imp::{displays, list_windows, place, prompt_for_trust, raise, trusted, Registry};
