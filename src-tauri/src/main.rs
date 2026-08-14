@@ -718,7 +718,7 @@ fn main() {
             let status = Status(Arc::new(Mutex::new("starting…".to_string())));
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             // Неактивный пункт: он не действие, а подпись. Стоит последним, под
             // «Quit», — читают его редко, а два пункта выше нажимают, и
