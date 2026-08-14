@@ -85,6 +85,10 @@ fn run_tracker(status: Status, trusted: Trusted) {
     // номера, а не сессии, и связать их может только тот, кто видел оба списка.
     let mut window_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut last_print: Option<String> = None;
+    // Прошлая жалоба на непривязанные окна — чтобы не повторять её каждый такт.
+    // Хранится сама строка, а не отметка времени: повод сказать снова — другая
+    // картина, а не прошедший срок.
+    let mut last_diag: Option<String> = None;
     let mut last_write_ms = 0u64;
     let pid = std::process::id();
     loop {
@@ -175,6 +179,45 @@ fn run_tracker(status: Status, trusted: Trusted) {
             {
                 window_of.insert(sid.clone(), w.id);
             }
+        }
+        // Окна, которые видно, но которые никому не достались. Правило
+        // совпадения то же, что у `window_of` строкой выше, и это не совпадение:
+        // «окно не нашло своей сессии» обязано значить ровно обратное тому, что
+        // значит «сессия нашла своё окно», иначе жалоба говорила бы о другом
+        // событии, чем то, на которое жалуются.
+        let unbound: Vec<String> = seen
+            .iter()
+            .filter(|w| {
+                let key = mwm_core::title::strip_decoration(&w.title);
+                !bound.values().any(|b| b.title == key)
+            })
+            .map(|w| w.title.clone())
+            .collect();
+        match mwm_core::diag::binding_note(
+            seen.len(),
+            bound.len(),
+            &unbound,
+            &tracker.unresolved(),
+        ) {
+            // Печатается на смену картины, а не каждый такт: такт секундный, и
+            // повторение одной и той же жалобы вытеснило бы из лога всё
+            // остальное за минуту. Смена — это другой состав непривязанных
+            // окон или другие заголовки у них, то есть ровно то, ради чего
+            // строку и читают.
+            //
+            // Время в строке — единственное во всём stderr, и стоит оно здесь
+            // не для красоты: launchd отметок не ставит, а жалоба нужна затем,
+            // чтобы лечь рядом с событием на другой машине (сон, разрыв,
+            // перезапуск) — без времени сводить её не с чем.
+            Some(note) if last_diag.as_deref() != Some(note.as_str()) => {
+                eprintln!("mwm: {} {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+                last_diag = Some(note);
+            }
+            Some(_) => {}
+            // Картина сошлась — прошлая жалоба забывается. Иначе следующая
+            // такая же потерялась бы как «уже говорил», а это была бы уже
+            // вторая поломка, а не та же самая.
+            None => last_diag = None,
         }
         // Снимок раскладки. Клон карты слотов (`tracker.slots_state()`) и
         // список сессий (`sessions_of`) строятся каждый такт безусловно, а не
