@@ -5,6 +5,7 @@
 //! него, отнял бы у меню отзывчивость.
 
 mod ax;
+mod config_file;
 mod deliver;
 mod dump;
 mod mqtt;
@@ -52,6 +53,108 @@ fn load_config() -> Config {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     parse_config(&text, &hostname)
+}
+
+/// Путь к config.yaml. Общий для чтения и записи: разойдись они двумя копиями,
+/// один читал бы не тот файл, что другой пишет.
+fn config_file_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(config_path(&home))
+}
+
+/// Патч, обнуляющий ключ, отклоняется явно — на любой глубине.
+///
+/// `merge_patch` вложенные отображения сливает по ключам, а `null` считает
+/// «не отображением» и подменяет блок целиком — так пропал бы `mqtt.password`,
+/// которого форма настроек никогда не загружает и не присылает обратно.
+/// Сегодняшняя форма такого патча не пришлёт, но если пришлёт когда-нибудь —
+/// лучше внятный отказ здесь, чем молча стёртый пароль.
+///
+/// Проверка рекурсивная именно из-за пароля: страшен не столько `mqtt: null`
+/// на верхнем уровне, сколько `{"mqtt": {"password": null}}` — тот стирает
+/// ровно тот ключ, ради которого всё слияние и написано.
+fn reject_null_values(patch: &serde_json::Value) -> Result<(), String> {
+    if let Some(fields) = patch.as_object() {
+        for (key, value) in fields {
+            if value.is_null() {
+                return Err(format!(
+                    "patch cannot null out key {key}: null would replace the whole block and wipe what the form did not send (mqtt.password, for one)"
+                ));
+            }
+            reject_null_values(value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Закрыть файл от всех, кроме владельца.
+///
+/// В конфиге лежит `mqtt.password`, а заводит файл теперь не человек своими
+/// руками, а окно настроек: с обычным umask пароль оказался бы читаем всей
+/// машине. Отказ не фатален — сохранить настройки важнее, чем выставить
+/// режим, — но и молчать о нём нельзя.
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("mwm: cannot restrict {}: {e}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path) {}
+
+/// Слить патч в config.yaml на диске.
+///
+/// Отдельно от команды сохранения: чистая файловая операция без `AppHandle`,
+/// её можно накрыть тестами во временном каталоге, не поднимая Tauri.
+///
+/// Бэкап кладётся один раз, перед первой перезаписью: комментарии человека
+/// после неё не восстановить ничем, а класть `.bak` на каждое сохранение
+/// значило бы затирать его же вчерашним состоянием.
+fn write_config(path: &std::path::Path, patch: &serde_json::Value) -> Result<(), String> {
+    reject_null_values(patch)?;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let existing = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+
+    let mut doc: serde_yaml::Value = if existing.trim().is_empty() {
+        serde_yaml::Value::Null
+    } else {
+        serde_yaml::from_str(&existing).map_err(|e| format!("bad yaml in {}: {e}", path.display()))?
+    };
+    config_file::merge_patch(&mut doc, patch)?;
+
+    // Тем же условием, что и разбор чуть выше: файл из одних пробелов и
+    // переводов строки тоже «был пустым», и бэкапить в нём нечего — иначе он
+    // занял бы единственный слот `.bak` навсегда.
+    let backup = path.with_extension("yaml.bak");
+    if !existing.trim().is_empty() && !backup.exists() {
+        std::fs::write(&backup, &existing)
+            .map_err(|e| format!("cannot write {}: {e}", backup.display()))?;
+        restrict_permissions(&backup);
+    }
+
+    // Через временный файл и переименование, как пишется state.json: читатель
+    // никогда не видит половину файла.
+    let text = format!("{}{}", config_file::HEADER, config_file::render(&doc)?);
+    let tmp = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    // До переименования, а не после: иначе у конфига был бы промежуток, в
+    // который пароль уже на месте, а права ещё общие.
+    restrict_permissions(&tmp);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // Rename не удался — не оставлять временный файл валяться на диске.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot rename onto {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// Такт трекера.
@@ -616,6 +719,93 @@ mod tests {
     /// открывает хвост.
     fn tracker_source() -> &'static str {
         include_str!("main.rs").split("#[cfg(test)]").next().unwrap()
+    }
+
+    /// Свой каталог во временной директории на каждый тест: `write_config`
+    /// трогает настоящую файловую систему, и тесты не должны видеть файлы друг
+    /// друга при параллельном запуске.
+    fn temp_config_path(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir()
+            .join(format!("mwm-test-{}-{tag}-{n}", std::process::id()))
+            .join("config.yaml")
+    }
+
+    #[test]
+    fn write_config_creates_missing_directory_and_file() {
+        let path = temp_config_path("missing-dir");
+        assert!(!path.parent().unwrap().exists());
+        super::write_config(&path, &serde_json::json!({"sshHost": "host"})).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("host"));
+    }
+
+    #[test]
+    fn write_config_keeps_untouched_keys() {
+        // Блок `state:` форма не показывает вовсе, и перезапись файла целиком
+        // стёрла бы человеку настроенные пути молча.
+        let path = temp_config_path("untouched");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "sshHost: old\nstate:\n  path: /tmp/s.json\n").unwrap();
+        super::write_config(&path, &serde_json::json!({"sshHost": "new"})).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("new"), "{text}");
+        assert!(!text.contains("old"), "{text}");
+        assert!(text.contains("/tmp/s.json"), "чужой ключ пережил запись: {text}");
+    }
+
+    #[test]
+    fn write_config_backs_up_once() {
+        // Второе сохранение затёрло бы единственную копию исходного файла его
+        // же, уже применённым, состоянием — и комментарии человека пропали бы
+        // окончательно.
+        let path = temp_config_path("backup-once");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "sshHost: original\n").unwrap();
+        super::write_config(&path, &serde_json::json!({"sshHost": "first"})).unwrap();
+        super::write_config(&path, &serde_json::json!({"sshHost": "second"})).unwrap();
+        let backup = std::fs::read_to_string(path.with_extension("yaml.bak")).unwrap();
+        assert!(backup.contains("original"), "{backup}");
+    }
+
+    #[test]
+    fn write_config_does_not_back_up_whitespace_only_file() {
+        // Иначе файл из пробелов занял бы единственный слот `.bak` навсегда.
+        let path = temp_config_path("whitespace-only");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "   \n\n").unwrap();
+        super::write_config(&path, &serde_json::json!({"sshHost": "host"})).unwrap();
+        assert!(!path.with_extension("yaml.bak").exists());
+    }
+
+    #[test]
+    fn write_config_rejects_null_at_any_depth() {
+        // `{"mqtt": {"password": null}}` стирает ровно тот ключ, ради которого
+        // написано слияние по ключам.
+        let path = temp_config_path("null-nested");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "mqtt:\n  host: broker\n  password: secret\n").unwrap();
+        let err = super::write_config(&path, &serde_json::json!({"mqtt": {"password": null}}))
+            .unwrap_err();
+        assert!(err.contains("password"), "{err}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("secret"), "пароль пережил отказ: {text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_keeps_files_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_config_path("permissions");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Права нарочно шире нужных: сохранение обязано их сузить, а не
+        // унаследовать.
+        std::fs::write(&path, "mqtt:\n  password: secret\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_config(&path, &serde_json::json!({"sshHost": "host"})).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "config.yaml");
+        assert_eq!(mode(&path.with_extension("yaml.bak")), 0o600, "config.yaml.bak");
     }
 
     #[test]

@@ -14,6 +14,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 rumqttc = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Конфиг теперь не только читается, но и пишется — окном настроек.
+serde_yaml = "0.9"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 
 # Accessibility: и перечисление окон, и (на следующем этапе) их подъём. Одно
