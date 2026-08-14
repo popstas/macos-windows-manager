@@ -1,5 +1,6 @@
 //! Тик трекера: какое окно какой сессии принадлежит.
 
+use crate::index::SessionRef;
 use crate::title::strip_decoration;
 use std::collections::{BTreeMap, HashMap};
 
@@ -57,7 +58,7 @@ impl Tracker {
     }
 
     /// Один такт: что видно на экране, что об этом знает дамп, который час.
-    pub fn tick(&mut self, seen: &[Seen], index: &BTreeMap<String, String>, now_ms: u64) {
+    pub fn tick(&mut self, seen: &[Seen], index: &BTreeMap<String, SessionRef>, now_ms: u64) {
         // Двойники по заголовку: побеждает больший идентификатор — окно новее.
         // Остальные остаются непривязанными, чтобы не драться за один слот.
         let mut winners: HashMap<&str, u64> = HashMap::new();
@@ -90,7 +91,7 @@ impl Tracker {
             }
             let key = strip_decoration(&stable);
             if let Some(sid) = index.get(&key) {
-                t.session_id = Some(sid.clone());
+                t.session_id = Some(sid.id.clone());
             } else if !key.is_empty() {
                 // Заголовок устоялся, а сессии под него нет — значит, дамп
                 // пора освежить. Ходить за ним на каждом такте незачем: он
@@ -160,8 +161,13 @@ mod tests {
 
     const SID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
 
-    fn index(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(t, s)| (t.to_string(), s.to_string())).collect()
+    fn index(pairs: &[(&str, &str)]) -> BTreeMap<String, crate::index::SessionRef> {
+        pairs
+            .iter()
+            .map(|(t, s)| {
+                (t.to_string(), crate::index::SessionRef { id: s.to_string(), cwd: String::new() })
+            })
+            .collect()
     }
 
     fn seen(id: u64, title: &str) -> Seen {

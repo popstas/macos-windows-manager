@@ -5,7 +5,7 @@
 //! попался незнакомый заголовок, и не чаще срока годности.
 
 use mwm_core::config::Config;
-use mwm_core::index::parse_index;
+use mwm_core::index::{parse_index, SessionRef};
 use std::collections::BTreeMap;
 use std::process::Command;
 
@@ -39,7 +39,7 @@ pub fn fetch(ssh_host: &str) -> Result<String, String> {
 /// Индекс со сроком годности.
 #[derive(Default)]
 pub struct Cache {
-    index: BTreeMap<String, String>,
+    index: BTreeMap<String, SessionRef>,
     fetched_ms: u64,
     pub last_error: Option<String>,
 }
@@ -50,7 +50,7 @@ impl Cache {
     /// `wanted` — трекеру попался заголовок, которого в индексе нет. Без этого
     /// признака ходили бы каждые пятнадцать секунд впустую: у машины, где
     /// ничего не открывали, индекс не меняется часами.
-    pub fn get(&mut self, cfg: &Config, now_ms: u64, wanted: bool) -> &BTreeMap<String, String> {
+    pub fn get(&mut self, cfg: &Config, now_ms: u64, wanted: bool) -> &BTreeMap<String, SessionRef> {
         let stale = now_ms.saturating_sub(self.fetched_ms) >= cfg.dump_cache_ms;
         if (wanted && stale) || self.fetched_ms == 0 {
             match fetch(&cfg.ssh_host) {
