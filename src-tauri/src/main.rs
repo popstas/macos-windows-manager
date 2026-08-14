@@ -651,6 +651,41 @@ fn save_settings(shared: tauri::State<'_, Shared>, patch: serde_json::Value) -> 
     Ok(())
 }
 
+/// Открыть окно настроек.
+///
+/// Создаётся лениво: объявленное в `tauri.conf.json` окно поднималось бы на
+/// старте, и второй webview висел бы в памяти у каждого, кто в настройки не
+/// заходит.
+///
+/// `async` здесь не украшение. Синхронную команду Tauri исполняет прямо в
+/// потоке цикла событий, а создание webview этот же цикл и ждёт: `build()`
+/// возвращает Ok, окно появляется, а страница в нём не загружается никогда —
+/// белый прямоугольник. Заплачено этим в соседнем ccfzf-picker.
+#[tauri::command]
+async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        // Свёрнутое окно `show` не разворачивает, а закрытое крестиком — это
+        // не уничтоженное: ветка выхода в `main` держит процесс живым, окно
+        // остаётся в списке скрытым.
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        tauri::WebviewUrl::App("settings.html".into()),
+    )
+    .title("macos-windows-manager Settings")
+    .inner_size(560.0, 620.0)
+    .center()
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("cannot open settings window: {e}"))?;
+    Ok(())
+}
+
 /// Время сборки этого бинаря, если оно в него вшито.
 ///
 /// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
@@ -670,7 +705,7 @@ fn build_time() -> Option<chrono::NaiveDateTime> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_settings, save_settings])
+        .invoke_handler(tauri::generate_handler![load_settings, save_settings, open_settings])
         .setup(|app| {
             // Окон у приложения нет, значит и месту в доке взяться неоткуда.
             // Без этой строки macOS считает процесс обычным приложением и
@@ -683,6 +718,7 @@ fn main() {
             let status = Status(Arc::new(Mutex::new("starting…".to_string())));
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             // Неактивный пункт: он не действие, а подпись. Стоит последним, под
             // «Quit», — читают его редко, а два пункта выше нажимают, и
@@ -704,10 +740,12 @@ fn main() {
             // пропадал через такт рисовальщика.
             let trusted_now = ax::trusted();
             let trusted = Trusted(Arc::new(AtomicBool::new(trusted_now)));
+            // `Settings…` встаёт над `Quit`, и `GRANT_POSITION` от этого не
+            // меняется: приходящий и уходящий пункт по-прежнему второй сверху.
             let menu = if trusted_now {
-                Menu::with_items(app, &[&state, &quit, &version])?
+                Menu::with_items(app, &[&state, &settings, &quit, &version])?
             } else {
-                Menu::with_items(app, &[&state, &grant, &quit, &version])?
+                Menu::with_items(app, &[&state, &grant, &settings, &quit, &version])?
             };
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
@@ -722,6 +760,17 @@ fn main() {
                 .icon(app.default_window_icon().cloned().unwrap())
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "grant" => ax::prompt_for_trust(),
+                    "settings" => {
+                        // Команда `async`, а обработчик — нет; отправляем её в
+                        // пул той же причины ради, что расписана у
+                        // `open_settings`.
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = open_settings(app).await {
+                                eprintln!("mwm: {e}");
+                            }
+                        });
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -773,8 +822,21 @@ fn main() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Закрытие последнего окна гасит приложение по умолчанию
+            // (tauri-runtime-wry 2.10.0, src/lib.rs:4177): у трея окон не было
+            // вовсе, и заметить это стало возможно только с появлением первого.
+            // Крестик на форме настроек не имеет права снять трекер.
+            //
+            // Только `code: None`. `app.exit(0)` из пункта `Quit` приезжает тем
+            // же событием с `code: Some(0)`, и глухая ветка сделала бы трей
+            // неубиваемым.
+            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 /// Тесты-сторожа: они читают исходник, а не зовут код.
@@ -880,6 +942,27 @@ mod tests {
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600, "config.yaml");
         assert_eq!(mode(&path.with_extension("yaml.bak")), 0o600, "config.yaml.bak");
+    }
+
+    #[test]
+    fn only_the_windowless_exit_is_prevented() {
+        // Закрытие последнего окна и `app.exit(0)` приезжают одним событием, и
+        // отличаются только кодом: `None` у первого, `Some(0)` у второго
+        // (tauri-runtime-wry 2.10.0, src/lib.rs:4177 и 4217). Глухая ветка на
+        // все коды сделала бы трей неубиваемым, а отсутствие ветки — крестик на
+        // окне настроек гасил бы трекер.
+        let src = tracker_source();
+        assert!(
+            src.contains("RunEvent::ExitRequested { code: None, api, .. }"),
+            "ветка выхода обязана быть только для code: None"
+        );
+        assert!(src.contains("api.prevent_exit()"), "и обязана звать prevent_exit");
+    }
+
+    #[test]
+    fn the_tray_has_a_settings_item() {
+        let src = tracker_source();
+        assert!(src.contains("\"settings\" =>"), "пункт settings обязан быть в обработчике меню");
     }
 
     #[test]

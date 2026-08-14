@@ -6,7 +6,8 @@
   "build": { "frontendDist": "../frontend" },
   "app": {
     "windows": [],
-    "macOSPrivateApi": false
+    "macOSPrivateApi": false,
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,

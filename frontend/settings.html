@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>macos-windows-manager Settings</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 18px 22px;
+    font: 13px -apple-system, system-ui, sans-serif;
+    background: #1c1c1e; color: #e6e6e6;
+  }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
+  .field { margin-bottom: 10px; }
+  .hint { color: #999; margin-top: 3px; }
+  #status { color: #999; margin-left: 10px; }
+  #status.bad { color: #ff7b72; }
+</style>
+</head>
+<body>
+<h2>Features</h2>
+<div id="features"></div>
+<button id="save">Save</button><span id="status"></span>
+<script>
+(async function () {
+  const invoke = (cmd, args) => (window.__TAURI__
+    ? window.__TAURI__.core.invoke(cmd, args)
+    : Promise.resolve());
+
+  const FLAGS = [
+    ['placement', 'Place windows where they were'],
+    ['snapshots', 'Keep layout snapshots'],
+    ['requests', 'Serve raise and unread requests over MQTT'],
+  ];
+  const status = document.getElementById('status');
+  let loaded = {};
+
+  function render(file) {
+    document.getElementById('features').innerHTML = FLAGS.map(([key, label]) => {
+      // Пусто в файле значит «включено»: тот же ответ, что даёт parse_config.
+      const on = (file.features || {})[key] !== false;
+      return `<div class="field"><label>
+        <input type="checkbox" id="f-${key}" ${on ? 'checked' : ''}> ${label}
+      </label></div>`;
+    }).join('');
+  }
+
+  async function load() {
+    const out = await invoke('load_settings') || {};
+    loaded = out.file || {};
+    render(loaded);
+  }
+
+  document.getElementById('save').addEventListener('click', async () => {
+    // Патч только из тронутого: иначе умолчания впечатывались бы в файл
+    // человеку, который их не выбирал.
+    const patch = {};
+    const features = {};
+    for (const [key] of FLAGS) {
+      const now = document.getElementById(`f-${key}`).checked;
+      const was = (loaded.features || {})[key] !== false;
+      if (now !== was) features[key] = now;
+    }
+    if (Object.keys(features).length) patch.features = features;
+    if (!Object.keys(patch).length) { status.textContent = 'nothing changed'; return; }
+    try {
+      await invoke('save_settings', { patch });
+      status.className = '';
+      status.textContent = 'saved';
+      await load();
+    } catch (e) {
+      status.className = 'bad';
+      status.textContent = String(e);
+    }
+  });
+
+  await load();
+})();
+</script>
+</body>
+</html>
