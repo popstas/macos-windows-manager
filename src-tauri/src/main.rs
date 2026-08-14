@@ -126,12 +126,17 @@ fn run_tracker(status: Status) {
         // этом потоке. Клампинг считается в момент расстановки, а не при
         // запоминании: экраны могли смениться, пока сессия была закрыта.
         let screens = ax::displays();
+        // Жалоба на расстановку копится до конца такта, а не пишется в трей
+        // сразу: итог такта ниже переписывает ту же ячейку целиком и затирал
+        // бы её в том же обороте. В stderr она оставалась, но трей —
+        // единственный канал, где человек видит отказ, не читая логов.
+        let mut place_note = String::new();
         for (window_id, want) in tracker.placements() {
             let target = mwm_core::geometry::clamp_to_displays(want, &screens);
             if let Err(e) = ax::place(&registry, window_id, target) {
                 // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
                 eprintln!("mwm: place failed: {e}");
-                *status.0.lock().unwrap() = format!("place failed: {e}");
+                place_note = format!("place failed: {e}");
             }
         }
         let bound = tracker.bound();
@@ -220,7 +225,7 @@ fn run_tracker(status: Status) {
         let fetch_note = cache
             .last_error
             .as_deref()
-            .map(|e| format!("; index fetch failed: {e}"));
+            .map_or_else(String::new, |e| format!("index fetch failed: {e}"));
 
         // Файл состояния пишется с `fsync`, и писать его на каждом такте —
         // плата за то, что не изменилось.
@@ -242,28 +247,29 @@ fn run_tracker(status: Status) {
             // что уже потрачено на его рождение.
             let payload =
                 build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &snaps);
+            let notes = [place_note.as_str(), fetch_note.as_str()];
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
                     last_write_ms = now;
                     let base = format!("{} windows tracked", bound.len());
-                    *status.0.lock().unwrap() =
-                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
+                    *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
                 // Ничего не копится: следующая посылка везёт текущее состояние
                 // целиком, а протухший файл читатель отбрасывает сам.
                 Err(e) => {
                     let base = format!("publish failed: {e}");
-                    *status.0.lock().unwrap() =
-                        fetch_note.as_deref().map_or_else(|| base.clone(), |n| format!("{base}{n}"));
+                    *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
             }
-        } else if let Some(note) = &fetch_note {
-            // Расклад не менялся, публикации в этом такте не было — но
-            // ошибка чтения дампа не должна ждать следующей записи файла,
-            // до неё может быть далеко (или не наступить вовсе, пока
-            // отпечаток не сдвинется).
-            *status.0.lock().unwrap() = format!("{} windows tracked{note}", bound.len());
+        } else if !place_note.is_empty() || !fetch_note.is_empty() {
+            // Расклад не менялся, публикации в этом такте не было — но отказ
+            // расстановки и ошибка чтения дампа не должны ждать следующей
+            // записи файла, до неё может быть далеко (или не наступить вовсе,
+            // пока отпечаток не сдвинется).
+            let base = format!("{} windows tracked", bound.len());
+            *status.0.lock().unwrap() =
+                mwm_core::status::status_line(&base, &[place_note.as_str(), fetch_note.as_str()]);
         }
     }
 }
