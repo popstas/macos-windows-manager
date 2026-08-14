@@ -199,13 +199,22 @@ impl Tracker {
             // координаты: иначе он ответил бы «окно уже там, где нужно».
             // Слот без координат предложения не порождает — двигать некуда —
             // но окно его всё равно истратило: второго раза не будет.
+            //
+            // Предложение гасится внутри проверки `w.bounds`, а не раньше:
+            // `None` там — платформа не ответила на этом такте, норма, а не
+            // сбой (см. `Seen.bounds`). Погаси мы признак до этой проверки,
+            // именно такой такт — окно только что появилось, платформа ещё не
+            // назвала координаты — сжигал бы предложение впустую, и окно
+            // молча оставалось бы там, где открылось.
             let mut just_placed = false;
             if t.awaiting_placement {
-                t.awaiting_placement = false;
-                if let (Some(want), Some(now_at)) = (slot.bounds, w.bounds) {
-                    if want != now_at {
-                        self.placements.push((w.id, want));
-                        just_placed = true;
+                if let Some(now_at) = w.bounds {
+                    t.awaiting_placement = false;
+                    if let Some(want) = slot.bounds {
+                        if want != now_at {
+                            self.placements.push((w.id, want));
+                            just_placed = true;
+                        }
                     }
                 }
             }
@@ -690,6 +699,31 @@ mod tests {
         // На его месте открылось новое — другой id, та же сессия по заголовку.
         t.tick(&[seen_at(2, "ccfzf", rect(900, 900))], &idx, 4_000);
         assert_eq!(t.placements(), vec![(2, rect(100, 100))], "новое окно — своё предложение");
+    }
+
+    #[test]
+    fn a_tick_without_geometry_does_not_burn_the_placement_offer() {
+        // `Seen.bounds == None` — платформа не ответила на этом такте, и это
+        // норма, а не сбой (раздел «Отказы» спеки). Такой такт как раз и
+        // выпадает на появление окна: заголовок только устоялся, а координаты
+        // платформа ещё не вернула. Если бы признак «предложение положено»
+        // гас раньше проверки `w.bounds`, окно молча осталось бы там, где
+        // открылось, — отказ невоспроизводимый по требованию.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        // Окно появилось, заголовок устоялся, но координат платформа не дала.
+        t.tick(&[seen(1, "ccfzf")], &idx, 2_000);
+        assert!(t.placements().is_empty(), "координат нет — решения о расстановке ещё не было");
+        // На следующем такте платформа ответила — расстановка происходит,
+        // предложение дождалось геометрии, а не сгорело тактом раньше.
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 3_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))], "предложение дождалось геометрии");
     }
 
     #[test]
