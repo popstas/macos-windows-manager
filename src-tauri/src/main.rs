@@ -92,6 +92,10 @@ fn run_tracker(status: Status, trusted: Trusted) {
     let mut last_write_ms = 0u64;
     let pid = std::process::id();
     loop {
+        // Настройки берутся один раз за оборот, а не по месту: иначе половина
+        // такта работала бы по старым флагам, половина по новым, и объяснить
+        // человеку увиденное было бы нечем.
+        let features = cfg.features.clone();
         // Ожидание вместо сна: просьба исполняется сразу, а не к следующему
         // такту. Отсоединение канала (поток подписки умер) — тот же сон:
         // `recv_timeout` на закрытом канале возвращается мгновенно, и без
@@ -106,6 +110,12 @@ fn run_tracker(status: Status, trusted: Trusted) {
                     pending.push(next);
                 }
                 for req in pending {
+                    // Очередь вычитывается всегда, а исполняется по флагу:
+                    // невычитанные просьбы копились бы в канале и хлынули бы
+                    // все разом в тот момент, когда человек вернёт тумблер.
+                    if !features.requests {
+                        continue;
+                    }
                     let note = serve(&req, &mut tracker, &registry, &window_of);
                     if let Some(note) = note {
                         eprintln!("mwm: {note}");
@@ -158,12 +168,17 @@ fn run_tracker(status: Status, trusted: Trusted) {
         // бы её в том же обороте. В stderr она оставалась, но трей —
         // единственный канал, где человек видит отказ, не читая логов.
         let mut place_note = String::new();
-        for (window_id, want) in tracker.placements() {
-            let target = mwm_core::geometry::clamp_to_displays(want, &screens);
-            if let Err(e) = ax::place(&registry, window_id, target) {
-                // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
-                eprintln!("mwm: place failed: {e}");
-                place_note = format!("place failed: {e}");
+        // Выключается только сама расстановка. Слоты продолжают вестись, и
+        // `state.json` продолжает писаться: иначе выключенный тумблер стирал бы
+        // человеку запомненные места, и вернувший его обратно не вернул бы их.
+        if features.placement {
+            for (window_id, want) in tracker.placements() {
+                let target = mwm_core::geometry::clamp_to_displays(want, &screens);
+                if let Err(e) = ax::place(&registry, window_id, target) {
+                    // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
+                    eprintln!("mwm: place failed: {e}");
+                    place_note = format!("place failed: {e}");
+                }
             }
         }
         let bound = tracker.bound();
@@ -234,53 +249,64 @@ fn run_tracker(status: Status, trusted: Trusted) {
         // `decide` выдавал `Append` на каждом такте — двадцать снимков за
         // двадцать секунд. Общий источник закрывает это по построению: что
         // решило `decide`, то и уедет на диск.
-        let open = tracker.open_session_ids();
-        let sessions = mwm_core::snapshots::sessions_of(&open, &tracker.slots_state());
-        let key = mwm_core::snapshots::composition_key(
-            &sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
-        );
-        let last_key = snaps
-            .first()
-            .map(|s| {
-                mwm_core::snapshots::composition_key(
-                    &s.sessions.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
-                )
-            })
-            .unwrap_or_default();
-        let decision = mwm_core::snapshots::decide(
-            &key, &last_key, &pending_key, pending_since_ms, now, cfg.snapshots_debounce_ms,
-        );
-        (pending_key, pending_since_ms) =
-            mwm_core::snapshots::track_composition(&key, &pending_key, pending_since_ms, now);
-        if let Some(d) = decision {
-            // Совпавший состав и координаты — не повод писать файл. `decide`
-            // отдаёт `Update` на каждом такте, пока состав не изменился, вне
-            // зависимости от того, сдвинулась ли хоть одна координата; сама
-            // запись — плата, а не решение, и её стоит нести, только когда
-            // содержимое действительно другое. Та же защита, что `take_dirty`
-            // даёт `state.json` строкой выше.
-            let unchanged = d == mwm_core::snapshots::Decision::Update
-                && snaps.first().map(|s| &s.sessions) == Some(&sessions);
-            if !sessions.is_empty() && !unchanged {
-                snaps = match d {
-                    mwm_core::snapshots::Decision::Append => mwm_core::snapshots::append(
-                        std::mem::take(&mut snaps),
-                        mwm_core::snapshots::snapshot_id(now / 1000),
-                        sessions,
-                        now / 1000,
-                        cfg.snapshots_keep,
-                    ),
-                    mwm_core::snapshots::Decision::Update => mwm_core::snapshots::update_last(
-                        std::mem::take(&mut snaps),
-                        sessions,
-                        now / 1000,
-                    ),
-                };
-                save_snapshots(&snapshots_path, &snaps);
+        //
+        // Выключенные снимки не считаются вовсе — ни ключ состава, ни дебаунс:
+        // считать дебаунс некому и не для чего, а вернув тумблер, человек
+        // получит первый снимок ровно тем же путём, что и при первом запуске.
+        if features.snapshots {
+            let open = tracker.open_session_ids();
+            let sessions = mwm_core::snapshots::sessions_of(&open, &tracker.slots_state());
+            let key = mwm_core::snapshots::composition_key(
+                &sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            );
+            let last_key = snaps
+                .first()
+                .map(|s| {
+                    mwm_core::snapshots::composition_key(
+                        &s.sessions.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default();
+            let decision = mwm_core::snapshots::decide(
+                &key, &last_key, &pending_key, pending_since_ms, now, cfg.snapshots_debounce_ms,
+            );
+            (pending_key, pending_since_ms) =
+                mwm_core::snapshots::track_composition(&key, &pending_key, pending_since_ms, now);
+            if let Some(d) = decision {
+                // Совпавший состав и координаты — не повод писать файл. `decide`
+                // отдаёт `Update` на каждом такте, пока состав не изменился, вне
+                // зависимости от того, сдвинулась ли хоть одна координата; сама
+                // запись — плата, а не решение, и её стоит нести, только когда
+                // содержимое действительно другое. Та же защита, что `take_dirty`
+                // даёт `state.json` строкой выше.
+                let unchanged = d == mwm_core::snapshots::Decision::Update
+                    && snaps.first().map(|s| &s.sessions) == Some(&sessions);
+                if !sessions.is_empty() && !unchanged {
+                    snaps = match d {
+                        mwm_core::snapshots::Decision::Append => mwm_core::snapshots::append(
+                            std::mem::take(&mut snaps),
+                            mwm_core::snapshots::snapshot_id(now / 1000),
+                            sessions,
+                            now / 1000,
+                            cfg.snapshots_keep,
+                        ),
+                        mwm_core::snapshots::Decision::Update => mwm_core::snapshots::update_last(
+                            std::mem::take(&mut snaps),
+                            sessions,
+                            now / 1000,
+                        ),
+                    };
+                    save_snapshots(&snapshots_path, &snaps);
+                }
             }
         }
 
-        let print = fingerprint(&bound, link.is_live());
+        // Одно значение на оба применения. Разойдись они — отпечаток не заметил
+        // бы смены флага, и файл окон дожил бы со старым `focus` до
+        // сердцебиения.
+        let focus = link.is_live() && features.requests;
+
+        let print = fingerprint(&bound, focus);
 
         // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
         // и разные починки, и одна не должна прятать другую. Без этой строки
@@ -311,8 +337,18 @@ fn run_tracker(status: Status, trusted: Trusted) {
             // перепишет файл не позже чем через полминуты, а снимок, чтобы
             // родиться, отстоял минуту дебаунса, — опоздание вдвое меньше того,
             // что уже потрачено на его рождение.
-            let payload =
-                build_file(&bound, &cfg.host, pid, now, link.is_live(), &cfg.mqtt.base, &snaps);
+            let payload = build_file(
+                &bound,
+                &cfg.host,
+                pid,
+                now,
+                focus,
+                &cfg.mqtt.base,
+                // Выключенные снимки не только не пишутся на диск, но и не
+                // публикуются: иначе пикер показывал бы в `^S` раскладки,
+                // которые эта машина больше не ведёт.
+                if features.snapshots { &snaps } else { &[] },
+            );
             let notes = [place_note.as_str(), fetch_note.as_str()];
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
@@ -562,4 +598,40 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Тесты-сторожа: они читают исходник, а не зовут код.
+///
+/// Такт трекера не разложить на чистые функции без переписывания всего файла, а
+/// проверить эти связки надо: они рвутся молча, и видны только на живом маке.
+/// Приём взят у соседнего ccfzf-picker, где точно так же сторожится пункт меню
+/// трея.
+#[cfg(test)]
+mod tests {
+    /// Исходник без хвоста с самими тестами.
+    ///
+    /// Строки, которые ищут сторожа, написаны и в них самих, — сравнивая с
+    /// целым файлом, они находили бы себя и проходили всегда. Резать по
+    /// `#[cfg(test)]` надёжно ровно потому, что этот атрибут в файле один: он и
+    /// открывает хвост.
+    fn tracker_source() -> &'static str {
+        include_str!("main.rs").split("#[cfg(test)]").next().unwrap()
+    }
+
+    #[test]
+    fn focus_is_gated_by_the_requests_flag() {
+        // Объявить умение поднимать окно, не собираясь его поднимать, значит
+        // подарить человеку молчащий Enter в пикере — а это хуже открытого
+        // терминала.
+        let src = tracker_source();
+        assert!(
+            src.contains("let focus = link.is_live() && features.requests;"),
+            "focus должен считаться от живого соединения И включённого флага"
+        );
+        // Отпечаток считается от того же значения: иначе выключенный тумблер
+        // доехал бы до файла окон только со следующим сердцебиением, до
+        // полуминуты спустя.
+        assert!(src.contains("fingerprint(&bound, focus)"), "отпечаток берёт то же focus");
+        assert!(src.contains("focus,\n"), "build_file получает то же focus");
+    }
 }
