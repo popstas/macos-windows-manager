@@ -379,6 +379,23 @@ fn serve(
     }
 }
 
+/// Время сборки этого бинаря, если оно в него вшито.
+///
+/// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
+/// штампе значит именно это — см. `build.rs`.
+///
+/// Живёт здесь, а не рядом с `version_item_label` в `mwm-core`: `env!` читает
+/// переменную того крейта, в котором написан, а вшивает её `build.rs`
+/// приложения.
+fn build_time() -> Option<chrono::NaiveDateTime> {
+    use chrono::TimeZone;
+    let secs: i64 = env!("MWM_BUILD_UNIX").parse().ok()?;
+    if secs == 0 {
+        return None;
+    }
+    Some(chrono::Local.timestamp_opt(secs, 0).single()?.naive_local())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -394,7 +411,21 @@ fn main() {
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&state, &grant, &quit])?;
+            // Неактивный пункт: он не действие, а подпись. Стоит последним, под
+            // «Quit», — читают его редко, а два пункта выше нажимают, и
+            // сдвигать их ради подписи нельзя.
+            let version = MenuItem::with_id(
+                app,
+                "version",
+                mwm_core::status::version_item_label(
+                    env!("CARGO_PKG_VERSION"),
+                    build_time(),
+                    chrono::Local::now().date_naive(),
+                ),
+                false,
+                None::<&str>,
+            )?;
+            let menu = Menu::with_items(app, &[&state, &grant, &quit, &version])?;
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
             // старте, и меню у него нет: в строке меню было видно два значка,

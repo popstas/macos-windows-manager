@@ -19,9 +19,74 @@ pub fn status_line(base: &str, notes: &[&str]) -> String {
     out
 }
 
+/// Подпись неактивного пункта меню: какая сборка сейчас запущена.
+///
+/// Нужна затем, что `deploy-mac.sh` обновляет бинарь на месте, а версия у всех
+/// сборок между релизами одна: после перезапуска нечем убедиться, что поднялось
+/// новое, — приходится ходить за `git log` по ssh.
+///
+/// Дата опускается у сегодняшней сборки — чаще всего она такая и есть, а
+/// повторять сегодняшнее число в трее незачем. «Сегодня» считается от запуска
+/// трекера, а не от открытия меню: меню строится один раз при старте, и у
+/// процесса, прожившего сутки, подпись покажет вчерашнюю сборку без даты. Цена
+/// принята: трекер, проживший сутки, перезапускали не сегодня, и вопрос «то ли
+/// собралось» к нему уже не стоит.
+///
+/// То же правило и тот же формат, что у пикера: два трея на одном экране, и
+/// подпись, читаемая по-разному, стоила бы человеку лишнего вопроса.
+pub fn version_item_label(
+    version: &str,
+    built: Option<chrono::NaiveDateTime>,
+    today: chrono::NaiveDate,
+) -> String {
+    let Some(built) = built else {
+        return format!("v{version}");
+    };
+    if built.date() == today {
+        format!("v{version} · {}", built.format("%H:%M"))
+    } else {
+        format!("v{version} · {}", built.format("%Y-%m-%d %H:%M"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{NaiveDate, NaiveDateTime};
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime {
+        day(y, m, d).and_hms_opt(h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn a_release_is_named_by_its_version_alone() {
+        // Ноль в штампе — это «сборка релизная» (см. `build.rs`): её называет
+        // версия, а время сборки там лишнее.
+        assert_eq!(version_item_label("0.1.0", None, day(2026, 8, 14)), "v0.1.0");
+    }
+
+    #[test]
+    fn a_build_from_today_shows_the_time_without_the_date() {
+        assert_eq!(
+            version_item_label("0.1.0", Some(at(2026, 8, 14, 17, 42)), day(2026, 8, 14)),
+            "v0.1.0 · 17:42"
+        );
+    }
+
+    #[test]
+    fn an_older_build_keeps_its_date() {
+        // Соль пункта: выкатка обновляет бинарь на месте, и вчерашнее время без
+        // даты выглядело бы сегодняшним — то есть отвечало бы «перезапустилось
+        // новое» на вопрос, ради которого пункт и заведён.
+        assert_eq!(
+            version_item_label("0.1.0", Some(at(2026, 8, 13, 17, 42)), day(2026, 8, 14)),
+            "v0.1.0 · 2026-08-13 17:42"
+        );
+    }
 
     #[test]
     fn nothing_to_complain_about_leaves_the_line_alone() {

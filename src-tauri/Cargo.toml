@@ -8,6 +8,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 mwm-core = { path = "../crates/mwm-core" }
+# Штамп сборки из `build.rs` — секунды эпохи; в подпись меню он идёт временем
+# локальной зоны, а её в std нет.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 rumqttc = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
