@@ -264,6 +264,38 @@ mod tests {
     }
 
     #[test]
+    fn a_reverted_composition_is_not_yet_a_decision() {
+        // Защитная ветка `!pending_key.is_empty() && pending_key != key`
+        // внутри «состав совпал с последним снимком» — итоговое ревью этапа 3
+        // называло её недостижимой. Она достижима: состав на такт отклонился
+        // от сохранённого и тут же вернулся, а `main.rs` зовёт `decide` до
+        // `track_composition` — decide этого такта видит `pending_key` ещё
+        // прошлого (отклонившегося) значения, хотя `key` уже снова совпадает
+        // с `last_key`. Итог такого такта — не «переписать», а «подождать»:
+        // ничего не потеряно, `pending_key` довернётся до `key` следующим
+        // `track_composition`, и такт после этого решит нормально.
+        let (pending_key, pending_since_ms) =
+            track_composition("B", /* pending_key прошлого такта */ "", 0, 1_000);
+        assert_eq!((pending_key.as_str(), pending_since_ms), ("B", 1_000));
+        // Состав вернулся к тому, что уже лежит в снимке, но pending_key
+        // (только что посчитанный) ещё указывает на отклонение.
+        assert_eq!(
+            decide("A", "A", &pending_key, pending_since_ms, 2_000, DEBOUNCE_MS),
+            None,
+            "ветка достижима: такт возврата не пишет и не молчит навсегда"
+        );
+        let (pending_key, pending_since_ms) =
+            track_composition("A", &pending_key, pending_since_ms, 2_000);
+        assert_eq!((pending_key.as_str(), pending_since_ms), ("A", 2_000));
+        // Следующий такт с тем же составом решает как обычно.
+        assert_eq!(
+            decide("A", "A", &pending_key, pending_since_ms, 3_000, DEBOUNCE_MS),
+            Some(Decision::Update),
+            "довернулось — такт после отклонения снова пишет"
+        );
+    }
+
+    #[test]
     fn a_composition_that_only_just_changed_waits_a_full_round() {
         // Ключ ещё не в ожидании — таймер начнётся с этого такта, а решения
         // сейчас нет.

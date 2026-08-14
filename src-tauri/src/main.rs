@@ -135,8 +135,21 @@ fn run_tracker(status: Status) {
         }
         // Снимок раскладки. Дорогого тут нет: пока состав не менялся и
         // координаты те же, всё сводится к склейке строки из id сессий.
+        //
+        // Состав для ключа берётся из того же `sessions_of`, что соберёт и
+        // сам снимок, — а не из `tracker.open_session_ids()` отдельно.
+        // `sessions_of` пропускает привязанную сессию без координат (это её
+        // документированная норма), и раньше `key` считал её, а снимок — нет:
+        // при такой сессии `key` навсегда расходился с `last_key`
+        // (посчитанным по уже сохранённому снимку, где её тоже нет), и
+        // `decide` выдавал `Append` на каждом такте — двадцать снимков за
+        // двадцать секунд. Общий источник закрывает это по построению: что
+        // решило `decide`, то и уедет на диск.
         let open = tracker.open_session_ids();
-        let key = mwm_core::snapshots::composition_key(&open);
+        let sessions = mwm_core::snapshots::sessions_of(&open, &tracker.slots_state());
+        let key = mwm_core::snapshots::composition_key(
+            &sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        );
         let last_key = snaps
             .first()
             .map(|s| {
@@ -151,8 +164,15 @@ fn run_tracker(status: Status) {
         (pending_key, pending_since_ms) =
             mwm_core::snapshots::track_composition(&key, &pending_key, pending_since_ms, now);
         if let Some(d) = decision {
-            let sessions = mwm_core::snapshots::sessions_of(&open, &tracker.slots_state());
-            if !sessions.is_empty() {
+            // Совпавший состав и координаты — не повод писать файл. `decide`
+            // отдаёт `Update` на каждом такте, пока состав не изменился, вне
+            // зависимости от того, сдвинулась ли хоть одна координата; сама
+            // запись — плата, а не решение, и её стоит нести, только когда
+            // содержимое действительно другое. Та же защита, что `take_dirty`
+            // даёт `state.json` строкой выше.
+            let unchanged = d == mwm_core::snapshots::Decision::Update
+                && snaps.first().map(|s| &s.sessions) == Some(&sessions);
+            if !sessions.is_empty() && !unchanged {
                 snaps = match d {
                     mwm_core::snapshots::Decision::Append => mwm_core::snapshots::append(
                         std::mem::take(&mut snaps),
