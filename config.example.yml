@@ -30,3 +30,21 @@ terminals:
 # response, while the dump already lags. Keep this at least a few times
 # larger than tickMs.
 # dumpCacheMs: 15000
+
+# Where the tracker keeps its own state on disk: remembered window slots and
+# layout snapshots. Not next to this file on purpose — this file you edit by
+# hand, those the tracker writes itself, and living side by side would invite
+# mixing up a backup of one with the working copy of the other.
+# Defaults below, under ~/.local/state/macos-windows-manager/. Overrides here
+# are not shell-expanded (no ssh involved, unlike remoteDir above) — write an
+# absolute path, not one starting with `~`.
+# state:
+#   # Remembered window positions, keyed by session id.
+#   path: /Users/you/.local/state/macos-windows-manager/state.json
+#   # Layout snapshots (see the ^S list on the picker).
+#   snapshotsPath: /Users/you/.local/state/macos-windows-manager/snapshots.json
+#   # How many snapshots to keep; oldest are dropped past this.
+#   keep: 20
+#   # How long a changed composition of open sessions must hold before it
+#   # becomes a new snapshot, in milliseconds.
+#   debounceMs: 60000
