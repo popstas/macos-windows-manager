@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
+// Ради `app.manage`: ячейка настроек кладётся в состояние приложения, оттуда
+// её берут команды окна.
+use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 
 /// Что показывать человеку в трее. Английский — правило проекта: всё, что
@@ -33,6 +36,23 @@ struct Status(Arc<Mutex<String>>);
 /// между собой.
 #[derive(Clone)]
 struct Trusted(Arc<AtomicBool>);
+
+/// Действующие настройки.
+///
+/// Ячейка, а не копия при старте: окно настроек пишет файл на ходу, и такт
+/// обязан узнать об этом со следующего оборота. Читает её трекер, пишет —
+/// команда сохранения.
+#[derive(Clone)]
+struct Shared(Arc<Mutex<Config>>);
+
+impl Shared {
+    /// Снимок настроек на один оборот такта. Копия, а не блокировка на весь
+    /// оборот: держать мьютекс, пока идёт ssh за дампом, значило бы подвесить
+    /// на это время окно настроек.
+    fn get(&self) -> Config {
+        self.0.lock().unwrap().clone()
+    }
+}
 
 /// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
 ///
@@ -165,7 +185,10 @@ fn write_config(path: &std::path::Path, patch: &serde_json::Value) -> Result<(),
 ///
 /// Без разрешения файл не пишется вовсе. Пустой файл означал бы «окон нет» и
 /// погасил бы чужие пометки; прежний протухнет у читателя сам, и это правда.
-fn run_tracker(status: Status, trusted: Trusted) {
+fn run_tracker(status: Status, trusted: Trusted, shared: Shared) {
+    // Копия при старте — для того, что на лету не меняется: путей состояния и
+    // потока подписки. Всё, что читается каждый оборот, берётся из ячейки
+    // внутри цикла.
     let cfg = load_config();
     let mut tracker = Tracker::new(2);
     // Слоты с прошлого запуска — до первого такта: иначе первое же окно
@@ -198,6 +221,11 @@ fn run_tracker(status: Status, trusted: Trusted) {
         // Настройки берутся один раз за оборот, а не по месту: иначе половина
         // такта работала бы по старым флагам, половина по новым, и объяснить
         // человеку увиденное было бы нечем.
+        //
+        // Затеняет внешний `cfg` намеренно: всё, что ниже, обязано смотреть на
+        // свежие настройки, и «забыл переименовать» здесь означало бы тихо
+        // работающий по старому кусок такта.
+        let cfg = shared.get();
         let features = cfg.features.clone();
         // Ожидание вместо сна: просьба исполняется сразу, а не к следующему
         // такту. Отсоединение канала (поток подписки умер) — тот же сон:
@@ -584,6 +612,45 @@ fn serve(
     }
 }
 
+/// Настройки, как их покажет окно.
+///
+/// Две картины, а не одна. `file` — то, что лежит в config.yaml: по нему форма
+/// заполняет поля и по нему же считает, что человек тронул. `effective` — то,
+/// что подхватил трекер, с умолчаниями: оно показывается подсказкой. Второй
+/// копии умолчаний в JS нет намеренно — она разошлась бы с `parse_config` на
+/// первой же правке.
+#[tauri::command]
+fn load_settings(shared: tauri::State<'_, Shared>) -> Result<serde_json::Value, String> {
+    let path = config_file_path();
+    let file: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => serde_yaml::from_str(&text)
+            .map_err(|e| format!("bad yaml in {}: {e}", path.display()))?,
+        // Файла нет или он пуст — не ошибка: окно настроек и заводится затем,
+        // чтобы его создать.
+        Ok(_) => serde_yaml::Value::Null,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_yaml::Value::Null,
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let file = serde_json::to_value(&file).map_err(|e| format!("cannot convert yaml: {e}"))?;
+    Ok(serde_json::json!({
+        "file": file,
+        "effective": mwm_core::config::to_json(&shared.get()),
+    }))
+}
+
+/// Сохранить присланное формой и объявить это трекеру.
+///
+/// Ячейка обновляется перечитыванием файла, а не патчем поверх прежнего
+/// конфига: разбирает YAML `parse_config`, и только он знает, во что
+/// превращаются мусор и умолчания. Собери мы новый `Config` из патча — окно
+/// показывало бы одно, а трекер работал бы по другому.
+#[tauri::command]
+fn save_settings(shared: tauri::State<'_, Shared>, patch: serde_json::Value) -> Result<(), String> {
+    write_config(&config_file_path(), &patch)?;
+    *shared.0.lock().unwrap() = load_config();
+    Ok(())
+}
+
 /// Время сборки этого бинаря, если оно в него вшито.
 ///
 /// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
@@ -603,6 +670,7 @@ fn build_time() -> Option<chrono::NaiveDateTime> {
 
 fn main() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![load_settings, save_settings])
         .setup(|app| {
             // Окон у приложения нет, значит и месту в доке взяться неоткуда.
             // Без этой строки macOS считает процесс обычным приложением и
@@ -659,9 +727,15 @@ fn main() {
                 })
                 .build(app)?;
 
+            // Ячейка заводится до потока трекера: тот читает её на первом же
+            // обороте, и заводить её после значило бы гоняться с ним за первый
+            // такт.
+            let shared = Shared(Arc::new(Mutex::new(load_config())));
+            app.manage(shared.clone());
+
             let worker = status.clone();
             let worker_trusted = trusted.clone();
-            std::thread::spawn(move || run_tracker(worker, worker_trusted));
+            std::thread::spawn(move || run_tracker(worker, worker_trusted, shared));
 
             // Строка состояния обновляется своим тиком: лезть в меню из потока
             // трекера нельзя — пункты меню живут на главном потоке.
@@ -806,6 +880,22 @@ mod tests {
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600, "config.yaml");
         assert_eq!(mode(&path.with_extension("yaml.bak")), 0o600, "config.yaml.bak");
+    }
+
+    #[test]
+    fn the_tick_rereads_the_shared_config() {
+        // Без этого сохранённый тумблер молчал бы до перезапуска, а молча не
+        // подействовавший тумблер хуже отсутствующего. Проверяется текстом:
+        // такт не разложить на чистые функции, не переписав файл целиком.
+        let src = tracker_source();
+        assert!(
+            src.contains("let cfg = shared.get();"),
+            "такт обязан брать конфиг из ячейки, а не из копии, прочитанной на старте"
+        );
+        assert!(
+            src.contains("*shared.0.lock().unwrap() = load_config();"),
+            "сохранение обязано класть в ячейку перечитанный с диска конфиг"
+        );
     }
 
     #[test]
