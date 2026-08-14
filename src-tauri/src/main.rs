@@ -12,6 +12,7 @@ mod mqtt;
 use mwm_core::config::{config_path, parse_config, Config};
 use mwm_core::publish::{build_file, fingerprint, should_write};
 use mwm_core::tracker::Tracker;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
@@ -21,6 +22,22 @@ use tauri::tray::TrayIconBuilder;
 /// видит человек, по-английски.
 #[derive(Clone)]
 struct Status(Arc<Mutex<String>>);
+
+/// Есть ли сейчас разрешение Accessibility.
+///
+/// Отвечает на этот вопрос трекер — он спрашивает систему каждый такт, — а
+/// читает поток, рисующий меню. Свой второй вызов `ax::trusted()` он мог бы
+/// сделать и сам, но тогда строка состояния и пункт «выдать разрешение»
+/// отвечали бы на один вопрос, спрошенный в разные моменты, и расходились бы
+/// между собой.
+#[derive(Clone)]
+struct Trusted(Arc<AtomicBool>);
+
+/// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
+///
+/// Второй сверху: под строкой состояния, над `Quit`. Место у него постоянное —
+/// пункт, который приходит и уходит, не должен ещё и прыгать по меню.
+const GRANT_POSITION: usize = 1;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
@@ -45,7 +62,7 @@ fn load_config() -> Config {
 ///
 /// Без разрешения файл не пишется вовсе. Пустой файл означал бы «окон нет» и
 /// погасил бы чужие пометки; прежний протухнет у читателя сам, и это правда.
-fn run_tracker(status: Status) {
+fn run_tracker(status: Status, trusted: Trusted) {
     let cfg = load_config();
     let mut tracker = Tracker::new(2);
     // Слоты с прошлого запуска — до первого такта: иначе первое же окно
@@ -97,7 +114,13 @@ fn run_tracker(status: Status) {
                 std::thread::sleep(Duration::from_millis(cfg.tick_ms));
             }
         }
-        if !ax::trusted() {
+        // Ответ системы объявляется всем, кому он нужен, а не только этой
+        // ветке: по нему поток меню решает, показывать ли пункт «выдать
+        // разрешение». Спрашивать второй раз из того потока — значит позволить
+        // двум ответам разойтись.
+        let is_trusted = ax::trusted();
+        trusted.0.store(is_trusted, Ordering::Relaxed);
+        if !is_trusted {
             *status.0.lock().unwrap() = "Accessibility not granted".to_string();
             // Один раз на потерю разрешения, а не каждый такт: жалоба длинная,
             // а такт секундный — в логе она вытеснила бы всё остальное за
@@ -425,7 +448,17 @@ fn main() {
                 false,
                 None::<&str>,
             )?;
-            let menu = Menu::with_items(app, &[&state, &grant, &quit, &version])?;
+            // Состояние разрешения выясняется до сборки меню, а не после:
+            // пункт «выдать разрешение» при выданном разрешении не нужен вовсе,
+            // и, соберись меню всегда с ним, при каждом запуске он мелькал бы и
+            // пропадал через такт рисовальщика.
+            let trusted_now = ax::trusted();
+            let trusted = Trusted(Arc::new(AtomicBool::new(trusted_now)));
+            let menu = if trusted_now {
+                Menu::with_items(app, &[&state, &quit, &version])?
+            } else {
+                Menu::with_items(app, &[&state, &grant, &quit, &version])?
+            };
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
             // старте, и меню у него нет: в строке меню было видно два значка,
@@ -445,18 +478,41 @@ fn main() {
                 .build(app)?;
 
             let worker = status.clone();
-            std::thread::spawn(move || run_tracker(worker));
+            let worker_trusted = trusted.clone();
+            std::thread::spawn(move || run_tracker(worker, worker_trusted));
 
             // Строка состояния обновляется своим тиком: лезть в меню из потока
             // трекера нельзя — пункты меню живут на главном потоке.
             let painter = status.clone();
             let handle = app.handle().clone();
+            let menu_for_painter = menu.clone();
+            // Стоит ли пункт в меню сейчас. Меню трогается только на смене
+            // ответа: без этой памяти каждые две секунды уходил бы `remove` или
+            // `insert` впустую, а повторный `remove` уже убранного пункта ещё и
+            // отвечает ошибкой.
+            let mut grant_shown = !trusted_now;
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let text = painter.0.lock().unwrap().clone();
+                // Разрешение выдают и отзывают на ходу, перезапуска macOS для
+                // этого не требует: `AXIsProcessTrusted` начинает отвечать
+                // иначе, трекер это видит на следующем такте — и пункт уходит
+                // или возвращается сам.
+                let want_grant = !trusted.0.load(Ordering::Relaxed);
+                let toggle = (want_grant != grant_shown).then_some(want_grant);
+                grant_shown = want_grant;
                 let _ = handle.run_on_main_thread({
                     let state = state.clone();
-                    move || { let _ = state.set_text(&text); }
+                    let grant = grant.clone();
+                    let menu = menu_for_painter.clone();
+                    move || {
+                        let _ = state.set_text(&text);
+                        match toggle {
+                            Some(true) => { let _ = menu.insert(&grant, GRANT_POSITION); }
+                            Some(false) => { let _ = menu.remove(&grant); }
+                            None => {}
+                        }
+                    }
                 });
             });
             Ok(())
