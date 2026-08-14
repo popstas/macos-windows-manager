@@ -18,6 +18,11 @@ pub struct Seen {
     /// а не сбой, и стоит она ровно того, что положение в этот такт не
     /// обновится.
     pub bounds: Option<Bounds>,
+    /// Заголовком приехало имя самого приложения — то есть про окно не сказано
+    /// ничего. Отдельный признак, а не сравнение заголовка со списком имён у
+    /// читателя: кто такой «kitty», знает платформенный слой, который и
+    /// перечисляет приложения, а трекеру достаётся уже готовый ответ.
+    pub nameless: bool,
 }
 
 /// Что уезжает читателю про одну сессию.
@@ -95,7 +100,31 @@ impl Tracker {
     }
 
     /// Один такт: что видно на экране, что об этом знает дамп, который час.
+    ///
+    /// Такт, на котором ни одно окно не назвалось, пропускается целиком:
+    /// прежняя привязка остаётся, и читателю продолжает уезжать она. Так
+    /// выглядит потушенный экран — macOS отдаёт заголовком имя приложения
+    /// сразу у всех окон и вдобавок выдаёт их новыми элементами, так что
+    /// липкость привязки к записи окна тут не спасает: записи новые.
+    ///
+    /// Это то же правило, по которому файл не пишется вовсе без разрешения
+    /// Accessibility: пустой список означал бы «окон нет» и погасил бы у
+    /// читателя живые сессии — причём ровно на то время, пока человек отошёл
+    /// от машины, то есть когда список нужен больше всего.
+    ///
+    /// Пустой `seen` под это правило не подпадает: «окон нет вовсе» — честный
+    /// ответ платформы, терминалы бывают и закрыты.
     pub fn tick(&mut self, seen: &[Seen], index: &BTreeMap<String, SessionRef>, now_ms: u64) {
+        if !seen.is_empty() && seen.iter().all(|w| w.nameless) {
+            // Просьбы прошлого такта не переживают заморозку: главный цикл
+            // читает `placements()` каждый оборот и выполнил бы уцелевшую
+            // столько раз, сколько тактов простоял потушенный экран. То же с
+            // `unresolved` — по нему решают, идти ли за дампом, а ходить за
+            // ним ради заголовка «kitty» незачем.
+            self.placements.clear();
+            self.unresolved.clear();
+            return;
+        }
         // Двойники по заголовку: побеждает больший идентификатор — окно новее.
         // Остальные остаются непривязанными, чтобы не драться за один слот.
         let mut winners: HashMap<&str, u64> = HashMap::new();
@@ -367,11 +396,18 @@ mod tests {
     }
 
     fn seen(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: None }
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false }
     }
 
     fn seen_at(id: u64, title: &str, b: Bounds) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: Some(b) }
+        Seen { id, title: title.to_string(), focused: false, bounds: Some(b), nameless: false }
+    }
+
+    /// Окно, про которое платформа сказала лишь имя приложения. Номер берётся
+    /// новый намеренно: на живой машине после гашения экрана окна приезжают
+    /// новыми элементами, и прежние номера вместе с привязкой теряются.
+    fn nameless(id: u64, title: &str) -> Seen {
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true }
     }
 
     fn rect(x: i32, y: i32) -> Bounds {
@@ -403,6 +439,74 @@ mod tests {
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 3_000);
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 4_000);
         assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID], "окно осталось за сессией");
+    }
+
+    #[test]
+    fn a_tick_where_nothing_has_a_name_of_its_own_changes_nothing() {
+        // Экран потушили. macOS отдаёт заголовком имя приложения у каждого
+        // окна разом, и вдобавок выдаёт сами окна новыми элементами — прежние
+        // номера теряются, а с ними и привязка, которая иначе пережила бы
+        // смену заголовка. Померено на живой машине 14.08.2026: `bound 0` на
+        // первом же такте после гашения при двух видимых окнах.
+        //
+        // Такой такт не сообщает ничего, и считать по нему — значит гасить
+        // список ровно на то время, пока человек отошёл от машины, то есть
+        // когда список нужен больше всего.
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
+        t.tick(&[seen(1, "ccfzf")], &idx, 2_000);
+        assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID]);
+        t.tick(&[nameless(2, "kitty")], &idx, 3_000);
+        assert_eq!(
+            t.bound().keys().collect::<Vec<_>>(),
+            vec![SID],
+            "привязка обязана пережить гашение экрана"
+        );
+    }
+
+    #[test]
+    fn a_nameless_window_among_named_ones_is_an_ordinary_window() {
+        // Обычная жизнь, а не поломка: только что открытое окно ещё не
+        // назвалось. Замораживать из-за него такт нельзя — соседи в этот
+        // момент живут своей жизнью, и их изменения обязаны доехать.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf"), nameless(2, "kitty")], &idx, 1_000);
+        assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID]);
+    }
+
+    #[test]
+    fn no_windows_at_all_is_the_truth_and_reaches_the_reader() {
+        // Пустой список — не молчание платформы, а честный ответ: терминалы
+        // закрыты. Заморозка здесь была бы враньём наоборот, и читатель
+        // показывал бы окна, которых нет.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
+        assert!(!t.bound().is_empty());
+        t.tick(&[], &idx, 2_000);
+        assert!(t.bound().is_empty(), "закрытые окна обязаны уехать из списка");
+    }
+
+    #[test]
+    fn a_frozen_tick_asks_for_nothing() {
+        // Предложение расстановки прошлого такта не должно пережить заморозку:
+        // главный цикл читает `placements()` каждый оборот, и уцелевшее
+        // предложение он выполнил бы заново — столько раз, сколько тактов
+        // простоял потушенный экран.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        t.tick(&[seen_at(1, "ccfzf", rect(700, 700))], &idx, 2_000);
+        assert_eq!(t.placements(), vec![(1, rect(100, 100))], "предложение случилось");
+        t.tick(&[nameless(2, "kitty")], &idx, 3_000);
+        assert!(t.placements().is_empty(), "на замороженном такте просить нечего");
     }
 
     #[test]
@@ -454,7 +558,7 @@ mod tests {
         let idx = index(&[("ccfzf", SID)]);
         t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.tick(&[seen(1, "ccfzf")], &idx, 9_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000, "отметка не откатывается");
@@ -512,7 +616,7 @@ mod tests {
         // свежее и побеждает по максимуму. Отматывать надо ту, что перебивает.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.mark_unread(SID);
         assert_eq!(t.bound()[SID].focused_at_ms, 0, "отметка отмотана сразу, а не к следующему такту");
@@ -524,7 +628,7 @@ mod tests {
         // прежнее значение, и отмотка выглядела бы сработавшей ровно на секунду.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false }], &idx, 5_000);
         t.mark_unread(SID);
         t.tick(&[seen(1, "ccfzf")], &idx, 6_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
@@ -537,9 +641,9 @@ mod tests {
         // запретом.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false }], &idx, 5_000);
         t.mark_unread(SID);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None }], &idx, 7_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false }], &idx, 7_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 7_000);
     }
 

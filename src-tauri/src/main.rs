@@ -185,17 +185,24 @@ fn run_tracker(status: Status, trusted: Trusted) {
         // «окно не нашло своей сессии» обязано значить ровно обратное тому, что
         // значит «сессия нашла своё окно», иначе жалоба говорила бы о другом
         // событии, чем то, на которое жалуются.
+        //
+        // Окно, назвавшееся именем приложения, потерянным не считается: про
+        // него платформа ничего не сказала (см. `Seen.nameless`), и такой такт
+        // трекер пропускает целиком. Считай их здесь — и каждое гашение экрана
+        // выглядело бы в логе поломкой, то есть жалоба приходила бы ровно на
+        // работающую починку.
         let unbound: Vec<String> = seen
             .iter()
             .filter(|w| {
                 let key = mwm_core::title::strip_decoration(&w.title);
-                !bound.values().any(|b| b.title == key)
+                !w.nameless && !bound.values().any(|b| b.title == key)
             })
             .map(|w| w.title.clone())
             .collect();
         match mwm_core::diag::binding_note(
             seen.len(),
             bound.len(),
+            seen.iter().filter(|w| w.nameless).count(),
             &unbound,
             &tracker.unresolved(),
         ) {

@@ -129,6 +129,17 @@ mod imp {
             } else {
                 None
             };
+            // Как зовут само приложение. Заголовок, равный этому имени, про
+            // окно не сообщает ничего: так macOS отвечает, пока экран потушен —
+            // у всех окон kitty заголовок разом становится «kitty». Что с
+            // таким тактом делать, решает трекер (`Tracker::tick`), здесь
+            // только факт.
+            //
+            // Имя берётся у приложения, а не сверяется со списком в конфиге:
+            // в конфиге лежат идентификаторы пакетов (`net.kovidgoyal.kitty`),
+            // а заголовком приезжает отображаемое имя, и выводить одно из
+            // другого — гадание.
+            let app_name = app.localizedName().map(|n| n.to_string()).unwrap_or_default();
             for w in windows_of(&el) {
                 let Some(title) = title_of(&w) else { continue };
                 if title.trim().is_empty() {
@@ -146,7 +157,12 @@ mod imp {
                 // него ссылки уже нет.
                 let bounds = bounds_of(&w);
                 alive.push(w);
-                out.push(Seen { id, focused, title, bounds });
+                // Сессия, названная в точности как терминал, признак получит
+                // зря — но цена этому невелика: такт замирает, только когда
+                // не назвалось ни одно окно, а рядом с такой сессией любое
+                // другое окно снимет заморозку.
+                let nameless = !app_name.is_empty() && title.trim() == app_name;
+                out.push(Seen { id, focused, title, bounds, nameless });
             }
         }
         reg.retain_seen(&alive);

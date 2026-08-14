@@ -27,19 +27,40 @@
 /// Заголовки печатаются как есть, со значком состояния и в кавычках: сравнение
 /// не сходится обычно как раз на невидимом — на хвостовом пробеле, на значке,
 /// который не сняли, на пустой строке вместо имени.
+///
+/// `nameless` — сколько окон назвались именем приложения. Такие окна не в счёт
+/// ни привязанным, ни потерянным: платформа про них ничего не сказала, и такт,
+/// где не назвалось ни одно, трекер пропускает целиком (см. `Tracker::tick`).
+/// Жаловаться на них значило бы жаловаться на каждое гашение экрана — то есть
+/// на работающую починку.
+///
+/// Один случай из них всё же стоит строки: не назвалось ничего, и привязать
+/// трекеру нечего. Так выглядит перезапуск при потушенном экране — заморозка
+/// сохраняет привязку, которой ещё не было, и список остаётся пустым до
+/// включения экрана. Молчать об этом нельзя: снаружи это неотличимо от
+/// поломки, которую строка и заведена ловить.
 pub fn binding_note(
     seen: usize,
     bound: usize,
+    nameless: usize,
     unbound: &[String],
     unresolved: &[String],
 ) -> Option<String> {
-    if unbound.is_empty() {
-        return None;
-    }
     let quoted = |v: &[String]| {
         v.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ")
     };
+    if unbound.is_empty() {
+        if nameless > 0 && bound == 0 {
+            return Some(format!(
+                "seen {seen} / bound 0; every window is nameless — the tick is frozen"
+            ));
+        }
+        return None;
+    }
     let mut out = format!("seen {seen} / bound {bound}; unbound: {}", quoted(unbound));
+    if nameless > 0 {
+        out.push_str(&format!("; nameless: {nameless}"));
+    }
     if !unresolved.is_empty() {
         out.push_str(&format!("; unresolved: {}", quoted(unresolved)));
     }
@@ -56,10 +77,10 @@ mod tests {
 
     #[test]
     fn every_window_bound_means_nothing_to_say() {
-        assert_eq!(binding_note(2, 2, &[], &[]), None);
+        assert_eq!(binding_note(2, 2, 0, &[], &[]), None);
         // Тот же ответ и когда дамп чего-то не знает: пока все окна привязаны,
         // это не поломка, а обычный такт работающей сессии.
-        assert_eq!(binding_note(2, 2, &[], &v(&["away-plan"])), None);
+        assert_eq!(binding_note(2, 2, 0, &[], &v(&["away-plan"])), None);
     }
 
     #[test]
@@ -67,7 +88,7 @@ mod tests {
         // Ради этого случая модуль и заведён: окна на экране есть, в списке
         // ноль, и до сих пор об этом нельзя было узнать ниоткуда.
         assert_eq!(
-            binding_note(2, 0, &v(&["✳ away-plan", "hide-grant-when-trusted"]), &[]),
+            binding_note(2, 0, 0, &v(&["✳ away-plan", "hide-grant-when-trusted"]), &[]),
             Some(
                 r#"seen 2 / bound 0; unbound: "✳ away-plan", "hide-grant-when-trusted""#
                     .to_string()
@@ -81,11 +102,11 @@ mod tests {
         // дамп про такую сессию не знает: чинить на той стороне. Заголовка
         // нет — дамп знает, а привязка всё равно не случилась: чинить здесь.
         assert_eq!(
-            binding_note(1, 0, &v(&["away-plan"]), &v(&["away-plan"])),
+            binding_note(1, 0, 0, &v(&["away-plan"]), &v(&["away-plan"])),
             Some(r#"seen 1 / bound 0; unbound: "away-plan"; unresolved: "away-plan""#.to_string())
         );
         assert_eq!(
-            binding_note(1, 0, &v(&["away-plan"]), &[]),
+            binding_note(1, 0, 0, &v(&["away-plan"]), &[]),
             Some(r#"seen 1 / bound 0; unbound: "away-plan""#.to_string())
         );
     }
@@ -96,8 +117,41 @@ mod tests {
         // Кавычки и escape в `{:?}` — единственное, что отличает "away-plan"
         // от "away-plan " в логе.
         assert_eq!(
-            binding_note(1, 0, &v(&["away-plan "]), &[]),
+            binding_note(1, 0, 0, &v(&["away-plan "]), &[]),
             Some(r#"seen 1 / bound 0; unbound: "away-plan ""#.to_string())
+        );
+    }
+
+    #[test]
+    fn a_frozen_tick_is_not_a_complaint() {
+        // Потушенный экран: окна назвались именем приложения, привязка держится
+        // прежняя, читателю уезжает она. Это работающая починка, а не поломка,
+        // и строки она не стоит — иначе лог полнился бы жалобами каждый раз,
+        // когда человек отошёл от машины.
+        assert_eq!(binding_note(2, 2, 2, &[], &[]), None);
+    }
+
+    #[test]
+    fn a_frozen_tick_with_nothing_bound_is_worth_a_line() {
+        // Перезапуск трекера при потушенном экране: заморозка бережёт привязку,
+        // которой ещё нет, и список остаётся пустым до включения экрана.
+        // Снаружи это неотличимо от той самой поломки, ради которой строка и
+        // заведена, — значит молчать нельзя.
+        assert_eq!(
+            binding_note(2, 0, 2, &[], &[]),
+            Some("seen 2 / bound 0; every window is nameless — the tick is frozen".to_string())
+        );
+    }
+
+    #[test]
+    fn nameless_neighbours_are_counted_beside_a_real_complaint() {
+        // Смешанный такт: одно окно потеряно по-настоящему, другое просто не
+        // назвалось. Второе к жалобе не относится, но знать о нём нужно —
+        // иначе `seen` не сходится с числом названных окон, и читающий лог
+        // ищет несуществующее третье окно.
+        assert_eq!(
+            binding_note(2, 0, 1, &v(&["away-plan"]), &[]),
+            Some(r#"seen 2 / bound 0; unbound: "away-plan"; nameless: 1"#.to_string())
         );
     }
 
@@ -106,7 +160,7 @@ mod tests {
         // Частичная потеря — тоже потеря: на панели пропадает одна строка из
         // двух, и по счётчикам это видно сразу.
         assert_eq!(
-            binding_note(2, 1, &v(&["away-plan"]), &[]),
+            binding_note(2, 1, 0, &v(&["away-plan"]), &[]),
             Some(r#"seen 2 / bound 1; unbound: "away-plan""#.to_string())
         );
     }
