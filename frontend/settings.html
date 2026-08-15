@@ -6,100 +6,229 @@
 <style>
   :root { color-scheme: dark; }
   body {
-    margin: 0; padding: 18px 22px;
+    margin: 0; padding: 18px 22px 0;
     font: 13px -apple-system, system-ui, sans-serif;
     background: #1c1c1e; color: #e6e6e6;
   }
-  h2 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 13px; font-weight: 600; margin: 18px 0 4px; }
+  h2:first-child { margin-top: 0; }
   .field { margin-bottom: 10px; }
+  .field label { display: block; margin-bottom: 3px; }
+  .field.check label { display: inline; }
+  input[type=text], input[type=password], textarea {
+    width: 100%; box-sizing: border-box;
+    padding: 4px 6px; border: 1px solid #3a3a3c; border-radius: 4px;
+    background: #2c2c2e; color: #e6e6e6;
+    font: inherit;
+  }
+  textarea { min-height: 62px; resize: vertical; }
   .hint { color: #999; margin-top: 3px; }
-  .note { color: #999; margin: 0 0 12px; }
+  .note { color: #999; margin: 0 0 8px; }
+  /* Форма выросла до четырнадцати полей и больше не помещается на экран
+     целиком: кнопка, уехавшая под сгиб, читается как её отсутствие. */
+  footer {
+    position: sticky; bottom: 0;
+    margin-top: 14px; padding: 12px 0;
+    background: #1c1c1e; border-top: 1px solid #3a3a3c;
+  }
   #status { color: #999; margin-left: 10px; }
   #status.bad { color: #ff7b72; }
 </style>
 </head>
 <body>
-<h2>Features</h2>
-<p class="note" id="scope"></p>
-<div id="features"></div>
-<button id="save">Save</button><span id="status"></span>
+<div id="form"></div>
+<footer><button id="save">Save</button><span id="status"></span></footer>
 <script>
 (async function () {
   const invoke = (cmd, args) => (window.__TAURI__
     ? window.__TAURI__.core.invoke(cmd, args)
     : Promise.resolve());
 
-  const FLAGS = [
-    ['placement', 'Place windows where they were',
-      'When a session’s window shows up again, put it back where that session '
-      + 'had it last time. Switched off, windows stay where the system opened them; '
-      + 'remembered places keep being recorded, so switching it back on resumes '
-      + 'placing windows that appear after that.'],
-    ['snapshots', 'Keep layout snapshots',
-      'Record which sessions were open and where, so the picker can bring a whole '
-      + 'layout back (the ^S list). Switched off, no new snapshots are written and '
-      + 'the ones already recorded stop being published.'],
-    ['requests', 'Serve raise and unread requests over MQTT',
-      'Let the picker ask this machine to raise a window or mark a session unread. '
-      + 'Switched off, the tracker also stops announcing that it can — the picker '
-      + 'offers no Enter instead of offering one that does nothing.'],
+  // Состав формы таблицей, а не разметкой: поле добавляется строкой, и
+  // сторож в main.rs проверяет по именам ключей, что ни одно не пропало.
+  //
+  // Блока `state:` здесь нет намеренно. Пути состояния правит тот, кто знает,
+  // зачем их менять, а слияние патча по ключам сохранит их нетронутыми и без
+  // редактора.
+  const GROUPS = [
+    { title: 'Features', fields: [
+      ['features.placement', 'check', 'Place windows where they were',
+        'When a session’s window shows up again, put it back where that session '
+        + 'had it last time. Switched off, windows stay where the system opened them; '
+        + 'remembered places keep being recorded, so switching it back on resumes '
+        + 'placing windows that appear after that.'],
+      ['features.snapshots', 'check', 'Keep layout snapshots',
+        'Record which sessions were open and where, so the picker can bring a whole '
+        + 'layout back (the ^S list). Switched off, no new snapshots are written and '
+        + 'the ones already recorded stop being published.'],
+      ['features.requests', 'check', 'Serve raise and unread requests over MQTT',
+        'Let the picker ask this machine to raise a window or mark a session unread. '
+        + 'Switched off, the tracker also stops announcing that it can — the picker '
+        + 'offers no Enter instead of offering one that does nothing.'],
+    ]},
+    { title: 'Connection', fields: [
+      ['sshHost', 'text', 'Machine where sessions and the aggregator live'],
+      ['remoteDir', 'text', 'Directory of tracker files on that machine'],
+      ['windowHost', 'text', 'Name of this machine, as the picker knows it'],
+    ]},
+    { title: 'Windows',
+      note: 'Only windows of these applications are tracked; everything else is left alone.',
+      fields: [
+        ['terminals', 'lines', 'Bundle ids counted as terminals, one per line'],
+        ['tickMs', 'number', 'Poll interval, milliseconds'],
+        ['dumpCacheMs', 'number', 'Session index cache age, milliseconds'],
+      ]},
+    { title: 'MQTT', note: 'Takes effect after restart.', fields: [
+      ['mqtt.host', 'text', 'Broker address'],
+      ['mqtt.port', 'number', 'Broker port'],
+      ['mqtt.user', 'text', 'User'],
+      ['mqtt.password', 'password', 'Leave empty to keep the stored one'],
+      ['mqtt.base', 'text', 'Topic prefix of this machine'],
+    ]},
   ];
 
-  // Имена вместо bundle id: в конфиге они машинные, а читает окно человек.
-  // Незнакомый id показывается как есть — список правится руками, и врать про
-  // него нечем.
-  const TERMINAL_NAMES = {
-    'com.googlecode.iterm2': 'iTerm2',
-    'net.kovidgoyal.kitty': 'kitty',
-    'com.mitchellh.ghostty': 'Ghostty',
-    'com.apple.Terminal': 'Terminal',
-  };
   const status = document.getElementById('status');
-  let loaded = {};
+  let file = {};
+  let effective = {};
 
   const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
-  function render(file) {
-    document.getElementById('features').innerHTML = FLAGS.map(([key, label, about]) => {
-      // Пусто в файле значит «включено»: тот же ответ, что даёт parse_config.
-      const on = (file.features || {})[key] !== false;
-      return `<div class="field"><label title="${escape(about)}">
-        <input type="checkbox" id="f-${key}" ${on ? 'checked' : ''}> ${label}
-      </label></div>`;
-    }).join('');
+  const at = (root, path) => path.split('.').reduce(
+    (node, key) => (node == null ? undefined : node[key]), root);
+
+  const fieldId = (path) => `f-${path.replace(/\./g, '-')}`;
+
+  // Показывается в поле то, что лежит в файле, — и ничего больше. Умолчание,
+  // подставленное в поле, человек сохранил бы обратно как свой выбор, и файл
+  // обрастал бы значениями, которых никто не выбирал.
+  function shown(path, kind) {
+    if (kind === 'password') return '';
+    const value = at(file, path);
+    if (value == null) return '';
+    return kind === 'lines' ? value.join('\n') : String(value);
   }
 
-  // Список берётся из действующего конфига, а не из константы: терминалы в нём
-  // правятся руками, и окно обязано называть те, которые эта машина и правда
-  // считает терминалами.
-  function renderScope(effective) {
-    const ids = (effective || {}).terminals || [];
-    const names = ids.map((id) => TERMINAL_NAMES[id] || id);
-    document.getElementById('scope').textContent = names.length
-      ? `Terminal windows only: ${names.join(', ')}. Other applications are left alone.`
-      : 'Terminal windows only.';
+  // Подсказка только у пустого поля: заполненное само показывает действующее
+  // значение, и вторая строка под каждым полем была бы шумом. Пустое же поле
+  // молчит о том, что работает вместо него, — а с этого вопроса начинается
+  // разбирательство с притихшим трекером.
+  function inEffect(path, kind) {
+    if (kind === 'check' || kind === 'password') return '';
+    if (shown(path, kind)) return '';
+    const value = at(effective, path);
+    if (value == null || (Array.isArray(value) && !value.length)) return '';
+    return `in effect: ${Array.isArray(value) ? value.join(', ') : value}`;
+  }
+
+  function render() {
+    document.getElementById('form').innerHTML = GROUPS.map((group) => {
+      const note = group.note ? `<p class="note">${escape(group.note)}</p>` : '';
+      const fields = group.fields.map(([path, kind, label, about]) => {
+        const id = fieldId(path);
+        const title = about ? ` title="${escape(about)}"` : '';
+        if (kind === 'check') {
+          // Пусто в файле значит «включено»: тот же ответ, что даёт parse_config.
+          const on = at(file, path) !== false;
+          return `<div class="field check"><label for="${id}"${title}>
+            <input type="checkbox" id="${id}" ${on ? 'checked' : ''}> ${escape(label)}
+          </label></div>`;
+        }
+        const hint = inEffect(path, kind);
+        const control = kind === 'lines'
+          ? `<textarea id="${id}">${escape(shown(path, kind))}</textarea>`
+          : `<input type="${kind === 'password' ? 'password' : 'text'}"
+               id="${id}" value="${escape(shown(path, kind))}">`;
+        return `<div class="field">
+          <label for="${id}"${title}>${escape(label)}</label>
+          ${control}
+          ${hint ? `<div class="hint">${escape(hint)}</div>` : ''}
+        </div>`;
+      }).join('');
+      return `<h2>${escape(group.title)}</h2>${note}${fields}`;
+    }).join('');
   }
 
   async function load() {
     const out = await invoke('load_settings') || {};
-    loaded = out.file || {};
-    render(loaded);
-    renderScope(out.effective);
+    file = out.file || {};
+    effective = out.effective || {};
+    render();
+  }
+
+  const put = (patch, path, value) => {
+    const keys = path.split('.');
+    const last = keys.pop();
+    keys.reduce((node, key) => (node[key] = node[key] || {}), patch)[last] = value;
+  };
+
+  // Собрать патч из тронутого или объяснить, почему собрать нельзя.
+  //
+  // Возвращает `{ patch }` либо `{ error }`: отказ обязан случиться до записи
+  // файла, а не на её половине.
+  function collect() {
+    const patch = {};
+    for (const group of GROUPS) {
+      for (const [path, kind, label] of group.fields) {
+        const input = document.getElementById(fieldId(path));
+        if (kind === 'check') {
+          const was = at(file, path) !== false;
+          if (input.checked !== was) put(patch, path, input.checked);
+          continue;
+        }
+        const raw = input.value.trim();
+        // Пустой пароль не едет в патч вовсе — иначе `Save`, нажатый ради
+        // соседнего поля, стирал бы сохранённый пароль каждому, кто открыл
+        // форму.
+        if (kind === 'password') {
+          if (raw) put(patch, path, raw);
+          continue;
+        }
+        const was = at(file, path);
+        if (!raw) {
+          // Стереть ключ формой нечем: слияние идёт по ключам, а `null`
+          // запись отклоняет — она стёрла бы соседний блок целиком. Молча
+          // проглоченная очистка соврала бы, что ключ убран.
+          if (was != null) {
+            return { error: `${label.toLowerCase()}: to remove ${path}, `
+              + 'delete the key in config.yaml by hand' };
+          }
+          continue;
+        }
+        if (kind === 'number') {
+          if (!/^\d+$/.test(raw)) return { error: `${path}: whole number expected` };
+          // Порт проверяется по границе, за которой parse_config молча берёт
+          // 1883: записанное в файл, но не подхваченное значение хуже отказа —
+          // человек видит в форме одно, а брокер получает другое.
+          if (path === 'mqtt.port' && (Number(raw) < 1 || Number(raw) > 65535)) {
+            return { error: `${path}: 1 to 65535` };
+          }
+          if (Number(raw) !== was) put(patch, path, Number(raw));
+          continue;
+        }
+        if (kind === 'lines') {
+          const list = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+          if (JSON.stringify(list) !== JSON.stringify(was || [])) put(patch, path, list);
+          continue;
+        }
+        if (raw !== (was == null ? '' : String(was))) put(patch, path, raw);
+      }
+    }
+    return { patch };
   }
 
   document.getElementById('save').addEventListener('click', async () => {
-    // Патч только из тронутого: иначе умолчания впечатывались бы в файл
-    // человеку, который их не выбирал.
-    const patch = {};
-    const features = {};
-    for (const [key] of FLAGS) {
-      const now = document.getElementById(`f-${key}`).checked;
-      const was = (loaded.features || {})[key] !== false;
-      if (now !== was) features[key] = now;
+    const { patch, error } = collect();
+    if (error) {
+      status.className = 'bad';
+      status.textContent = error;
+      return;
     }
-    if (Object.keys(features).length) patch.features = features;
-    if (!Object.keys(patch).length) { status.textContent = 'nothing changed'; return; }
+    if (!Object.keys(patch).length) {
+      status.className = '';
+      status.textContent = 'nothing changed';
+      return;
+    }
     try {
       await invoke('save_settings', { patch });
       status.className = '';

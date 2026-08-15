@@ -952,6 +952,26 @@ mod tests {
     }
 
     #[test]
+    fn the_form_covers_every_field_it_promises() {
+        // Поле, забытое в форме, выглядит не поломкой, а отсутствующей
+        // настройкой: человек ищет его глазами и не находит. Дешёвый сторож
+        // ровно на этот случай.
+        let page = include_str!("../../frontend/settings.html");
+        for key in [
+            "placement", "snapshots", "requests",
+            "sshHost", "remoteDir", "windowHost",
+            "terminals", "tickMs", "dumpCacheMs",
+            "host", "port", "user", "password", "base",
+        ] {
+            assert!(page.contains(key), "поле {key} пропало из формы");
+        }
+        assert!(
+            page.contains("after restart"),
+            "группа MQTT обязана честно говорить, что действует после перезапуска"
+        );
+    }
+
+    #[test]
     fn only_the_windowless_exit_is_prevented() {
         // Закрытие последнего окна и `app.exit(0)` приезжают одним событием, и
         // отличаются только кодом: `None` у первого, `Some(0)` у второго
