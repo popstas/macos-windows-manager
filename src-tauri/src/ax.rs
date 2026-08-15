@@ -280,6 +280,27 @@ mod imp {
         Ok(())
     }
 
+    /// Вывести вперёд само приложение.
+    ///
+    /// Нужно ровно по той же причине, что и вторая половина `raise()`, только
+    /// для своего процесса: `show`, `unminimize` и `set_focus` двигают окно
+    /// внутри приложения, а какое приложение впереди, решает AppKit. У
+    /// `Accessory` это видно во всей красе — окно настроек открывается за
+    /// терминалом, из которого человек только что полез в меню трея.
+    ///
+    /// Политику приложения этот вызов не трогает намеренно. Переключить её на
+    /// `Regular` было бы вторым известным способом — и вернуло бы значок в док,
+    /// ровно то, ради чего `Accessory` в `main()` и стоит.
+    pub fn activate_self() -> Result<(), String> {
+        let app = NSRunningApplication::currentApplication();
+        // Пустой набор параметров — по той же причине, что в `raise()`:
+        // `ActivateIgnoringOtherApps` с macOS 14 объявлен ничего не делающим.
+        if !app.activateWithOptions(NSApplicationActivationOptions::empty()) {
+            return Err("failed to activate this application".to_string());
+        }
+        Ok(())
+    }
+
     /// Поставить окно в заданный прямоугольник.
     ///
     /// Позиция ставится раньше размера. Порядок не безразличен: некоторые
@@ -388,10 +409,15 @@ mod imp {
     pub fn raise(_reg: &Registry, _window_id: u64) -> Result<(), String> {
         Err("raise is available on macOS only".to_string())
     }
+    pub fn activate_self() -> Result<(), String> {
+        Err("activating the application is available on macOS only".to_string())
+    }
     pub fn place(_reg: &Registry, _window_id: u64, _b: Bounds) -> Result<(), String> {
         Err("placing windows is available on macOS only".to_string())
     }
     pub fn displays() -> Vec<Display> { Vec::new() }
 }
 
-pub use imp::{displays, list_windows, place, prompt_for_trust, raise, trusted, Registry};
+pub use imp::{
+    activate_self, displays, list_windows, place, prompt_for_trust, raise, trusted, Registry,
+};

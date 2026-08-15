@@ -677,19 +677,30 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
-        return Ok(());
+    } else {
+        tauri::WebviewWindowBuilder::new(
+            &app,
+            "settings",
+            tauri::WebviewUrl::App("settings.html".into()),
+        )
+        .title("macos-windows-manager Settings")
+        .inner_size(560.0, 620.0)
+        .center()
+        .resizable(true)
+        .build()
+        .map_err(|e| format!("cannot open settings window: {e}"))?;
     }
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        tauri::WebviewUrl::App("settings.html".into()),
-    )
-    .title("macos-windows-manager Settings")
-    .inner_size(560.0, 620.0)
-    .center()
-    .resizable(true)
-    .build()
-    .map_err(|e| format!("cannot open settings window: {e}"))?;
+    // Обе ветки проходят через активацию: `set_focus` и `build` двигают окно
+    // внутри приложения, а впереди остаётся то, из которого человек полез в
+    // меню трея, — терминал. Ветки объединены ради этой строки: разойдись они,
+    // одна из двух дорог рано или поздно её потеряла бы.
+    //
+    // Отказ активации не отменяет открытия: окно уже создано и показано, и
+    // отвечать на это ошибкой значило бы пугать человека тем, что он и так
+    // видит. Но и молчать нельзя — в лог.
+    if let Err(e) = ax::activate_self() {
+        eprintln!("mwm: {e}");
+    }
     Ok(())
 }
 
@@ -952,6 +963,44 @@ mod tests {
     }
 
     #[test]
+    fn the_build_script_watches_what_lives_outside_the_package() {
+        // Поймать это поведением нельзя: про `build.rs` cargo решает раньше,
+        // чем начнёт выполняться хоть что-то наше. Отсюда сторож по тексту.
+        let script = include_str!("../build.rs");
+        for dir in ["../crates", "../frontend"] {
+            assert!(
+                script.contains(&format!("cargo:rerun-if-changed={dir}")),
+                "штамп сборки застынет на прошлой выкатке при правке одного {dir}"
+            );
+        }
+        // Путь фронтенда тот же, что в конфиге: разойдись они, скрипт следил
+        // бы за каталогом, из которого статику никто не берёт.
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["build"]["frontendDist"].as_str().unwrap(), "../frontend");
+    }
+
+    #[test]
+    fn the_form_covers_every_field_it_promises() {
+        // Поле, забытое в форме, выглядит не поломкой, а отсутствующей
+        // настройкой: человек ищет его глазами и не находит. Дешёвый сторож
+        // ровно на этот случай.
+        let page = include_str!("../../frontend/settings.html");
+        for key in [
+            "placement", "snapshots", "requests",
+            "sshHost", "remoteDir", "windowHost",
+            "terminals", "tickMs", "dumpCacheMs",
+            "host", "port", "user", "password", "base",
+        ] {
+            assert!(page.contains(key), "поле {key} пропало из формы");
+        }
+        assert!(
+            page.contains("after restart"),
+            "группа MQTT обязана честно говорить, что действует после перезапуска"
+        );
+    }
+
+    #[test]
     fn only_the_windowless_exit_is_prevented() {
         // Закрытие последнего окна и `app.exit(0)` приезжают одним событием, и
         // отличаются только кодом: `None` у первого, `Some(0)` у второго
@@ -964,6 +1013,21 @@ mod tests {
             "ветка выхода обязана быть только для code: None"
         );
         assert!(src.contains("api.prevent_exit()"), "и обязана звать prevent_exit");
+    }
+
+    #[test]
+    fn opening_the_settings_window_brings_the_application_forward() {
+        // У `Accessory`-приложения окно, показанное без активации, остаётся за
+        // терминалом, из которого человек полез в меню трея: `set_focus`
+        // двигает окно внутри приложения, а какое приложение впереди, решает
+        // AppKit. Проверяется текстом — вызов уходит в AppKit, и на машине
+        // разработки этой ветки нет вовсе.
+        let src = tracker_source();
+        let open = src.split("async fn open_settings").nth(1).unwrap_or("");
+        assert!(
+            open.contains("ax::activate_self()"),
+            "открытие настроек обязано выводить приложение вперёд"
+        );
     }
 
     #[test]
