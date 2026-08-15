@@ -181,6 +181,7 @@ impl Tracker {
                 }
             }
             let Some(stable) = t.stable.clone() else { continue };
+            let key = strip_decoration(&stable);
             if winners.get(w.title.as_str()) != Some(&w.id) {
                 // Слота проигравшему не достанется, но предложение расстановки
                 // он тратит здесь же. Пролежи оно до закрытия победителя —
@@ -189,15 +190,24 @@ impl Tracker {
                 // всё это время видел его там, где оно стоит, и мог двигать
                 // руками. Правило 2 запрещает такую драку за перетаскивание.
                 //
+                // Тратится оно только на драке за заголовок известной сессии.
+                // Совпасть заголовки успевают и до всякой сессии: iTerm зовёт
+                // окно именем процесса, и пока `ssh` поднимается, так зовутся
+                // разом все окна, открытые одной пачкой, — восстановлением
+                // снимка, например. Заголовок этот держится дольше
+                // `stable_ticks`, то есть успевает устояться, и жёг предложение
+                // каждому окну, кроме одного: слот у них здоровый, а вставало
+                // из трёх окон снимка два. Драки за слот там нет — слота у
+                // «ssh» не бывает вовсе.
+                //
                 // Условие на координаты — то же, что и у основной ветки ниже:
                 // `None` значит «платформа не ответила на этом такте» (см.
                 // `Seen.bounds`), а не «окно предложения не заслужило».
-                if w.bounds.is_some() {
+                if w.bounds.is_some() && index.contains_key(&key) {
                     t.awaiting_placement = false;
                 }
                 continue;
             }
-            let key = strip_decoration(&stable);
             if let Some(sid) = index.get(&key) {
                 t.session_id = Some(sid.id.clone());
             } else if !key.is_empty() {
@@ -702,6 +712,43 @@ mod tests {
         t.tick(&[], &idx, 1_000);
         t.tick(&[seen_at(1, "ccfzf", rect(100, 100))], &idx, 2_000);
         assert!(t.placements().is_empty());
+    }
+
+    #[test]
+    fn a_transient_title_shared_by_two_windows_does_not_cost_a_placement() {
+        // Восстановление снимка открывает окна пачкой, и каждое несколько
+        // секунд зовётся «ssh» — соединение ещё поднимается. Заголовок этот
+        // успевает устояться, и два окна оказываются двойниками по нему.
+        // Победитель один, а проигравший тратил на этом месте своё
+        // единственное предложение расстановки — и оставался там, где его
+        // открыла система, хотя слот у него здоровый. Ровно так на макбуке из
+        // трёх окон снимка вставали два.
+        const OTHER: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+        let mut t = Tracker::new(2);
+        let idx = index(&[("obsidian", SID), ("skill-do", OTHER)]);
+        let mut slots = BTreeMap::new();
+        slots.insert(SID.to_string(), SlotState {
+            bounds: Some(rect(100, 100)), ..Default::default()
+        });
+        slots.insert(OTHER.to_string(), SlotState {
+            bounds: Some(rect(200, 200)), ..Default::default()
+        });
+        t.load_slots(slots);
+        t.tick(&[], &idx, 1_000);
+        // Оба окна открылись и оба зовутся «ssh» — два такта подряд, то есть
+        // заголовок для трекера устоялся.
+        let ssh = [seen_at(1, "ssh", rect(700, 700)), seen_at(2, "ssh", rect(700, 700))];
+        t.tick(&ssh, &idx, 2_000);
+        t.tick(&ssh, &idx, 3_000);
+        // Заголовки разъехались на настоящие и тоже устоялись.
+        let real = [seen_at(1, "obsidian", rect(700, 700)), seen_at(2, "skill-do", rect(700, 700))];
+        t.tick(&real, &idx, 4_000);
+        t.tick(&real, &idx, 5_000);
+        let placed: Vec<u64> = t.placements().iter().map(|(id, _)| *id).collect();
+        assert!(
+            placed.contains(&1),
+            "окно, проигравшее драку за чужой временный заголовок, осталось неприбранным: {placed:?}"
+        );
     }
 
     #[test]
