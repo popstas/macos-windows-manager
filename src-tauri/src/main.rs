@@ -677,19 +677,30 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
-        return Ok(());
+    } else {
+        tauri::WebviewWindowBuilder::new(
+            &app,
+            "settings",
+            tauri::WebviewUrl::App("settings.html".into()),
+        )
+        .title("macos-windows-manager Settings")
+        .inner_size(560.0, 620.0)
+        .center()
+        .resizable(true)
+        .build()
+        .map_err(|e| format!("cannot open settings window: {e}"))?;
     }
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        tauri::WebviewUrl::App("settings.html".into()),
-    )
-    .title("macos-windows-manager Settings")
-    .inner_size(560.0, 620.0)
-    .center()
-    .resizable(true)
-    .build()
-    .map_err(|e| format!("cannot open settings window: {e}"))?;
+    // Обе ветки проходят через активацию: `set_focus` и `build` двигают окно
+    // внутри приложения, а впереди остаётся то, из которого человек полез в
+    // меню трея, — терминал. Ветки объединены ради этой строки: разойдись они,
+    // одна из двух дорог рано или поздно её потеряла бы.
+    //
+    // Отказ активации не отменяет открытия: окно уже создано и показано, и
+    // отвечать на это ошибкой значило бы пугать человека тем, что он и так
+    // видит. Но и молчать нельзя — в лог.
+    if let Err(e) = ax::activate_self() {
+        eprintln!("mwm: {e}");
+    }
     Ok(())
 }
 
@@ -1002,6 +1013,21 @@ mod tests {
             "ветка выхода обязана быть только для code: None"
         );
         assert!(src.contains("api.prevent_exit()"), "и обязана звать prevent_exit");
+    }
+
+    #[test]
+    fn opening_the_settings_window_brings_the_application_forward() {
+        // У `Accessory`-приложения окно, показанное без активации, остаётся за
+        // терминалом, из которого человек полез в меню трея: `set_focus`
+        // двигает окно внутри приложения, а какое приложение впереди, решает
+        // AppKit. Проверяется текстом — вызов уходит в AppKit, и на машине
+        // разработки этой ветки нет вовсе.
+        let src = tracker_source();
+        let open = src.split("async fn open_settings").nth(1).unwrap_or("");
+        assert!(
+            open.contains("ax::activate_self()"),
+            "открытие настроек обязано выводить приложение вперёд"
+        );
     }
 
     #[test]
