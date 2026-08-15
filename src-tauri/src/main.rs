@@ -952,6 +952,24 @@ mod tests {
     }
 
     #[test]
+    fn the_build_script_watches_what_lives_outside_the_package() {
+        // Поймать это поведением нельзя: про `build.rs` cargo решает раньше,
+        // чем начнёт выполняться хоть что-то наше. Отсюда сторож по тексту.
+        let script = include_str!("../build.rs");
+        for dir in ["../crates", "../frontend"] {
+            assert!(
+                script.contains(&format!("cargo:rerun-if-changed={dir}")),
+                "штамп сборки застынет на прошлой выкатке при правке одного {dir}"
+            );
+        }
+        // Путь фронтенда тот же, что в конфиге: разойдись они, скрипт следил
+        // бы за каталогом, из которого статику никто не берёт.
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["build"]["frontendDist"].as_str().unwrap(), "../frontend");
+    }
+
+    #[test]
     fn the_form_covers_every_field_it_promises() {
         // Поле, забытое в форме, выглядит не поломкой, а отсутствующей
         // настройкой: человек ищет его глазами и не находит. Дешёвый сторож
