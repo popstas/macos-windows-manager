@@ -17,10 +17,14 @@ remoteDir: ~/.ccfzf/windows
 # windowHost: my-mac
 
 # Bundle id of applications whose windows count as terminals.
+# A terminal missing from this list is invisible to the tracker: its windows are
+# never asked for a title, so the session shows no window at all.
+# The list replaces the default rather than extending it.
 terminals:
   - net.kovidgoyal.kitty
   - com.mitchellh.ghostty
   - com.googlecode.iterm2
+  - com.github.wez.wezterm
 
 # Feature switches. Every one of them defaults to on: a config written before
 # this block existed must keep behaving exactly as it did.

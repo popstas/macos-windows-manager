@@ -74,6 +74,22 @@ pub struct Config {
     pub features: Features,
 }
 
+/// Терминалы, чьи окна считаются терминалами, пока человек не сказал иначе.
+///
+/// Список один и живёт здесь: разойдись он с копией, часть проверок доказывала
+/// бы умолчание, которого нет. Не названного здесь терминала трекер не видит
+/// вовсе — `list_windows` перебирает только приложения из этого списка, — и
+/// отказ этот молчащий: окна нет ни в файле, ни в логе. Так пропал WezTerm,
+/// на который пикер переехал раньше трекера.
+pub fn default_terminals() -> Vec<String> {
+    vec![
+        "net.kovidgoyal.kitty".to_string(),
+        "com.mitchellh.ghostty".to_string(),
+        "com.googlecode.iterm2".to_string(),
+        "com.github.wez.wezterm".to_string(),
+    ]
+}
+
 /// Разобрать конфиг, подставив умолчания всему, чего в нём нет.
 ///
 /// Испорченный файл стоит настроек, а не запуска: трекер без настроек хотя бы
@@ -132,13 +148,7 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
                 Some(vec)
             }
         })
-        .unwrap_or_else(|| {
-            vec![
-                "net.kovidgoyal.kitty".to_string(),
-                "com.mitchellh.ghostty".to_string(),
-                "com.googlecode.iterm2".to_string(),
-            ]
-        });
+        .unwrap_or_else(default_terminals);
 
     let tick_ms = map
         .get("tickMs")
@@ -299,10 +309,14 @@ mod tests {
         assert_eq!(c.host, "mac-host", "имя своей машины берётся у системы");
         assert_eq!(c.tick_ms, 1_000);
         assert_eq!(c.dump_cache_ms, 15_000);
+        // Список выписан здесь дословно, а не сверен с `default_terminals()`:
+        // сверка с самой собой не доказала бы ничего, а терминал, выпавший из
+        // умолчания, не виден трекеру вовсе и молча.
         assert_eq!(c.terminals, vec![
             "net.kovidgoyal.kitty".to_string(),
             "com.mitchellh.ghostty".to_string(),
             "com.googlecode.iterm2".to_string(),
+            "com.github.wez.wezterm".to_string(),
         ]);
     }
 
@@ -384,11 +398,8 @@ mod tests {
             "sshHost: remote-host\nterminals: []\n",
             "mac-host",
         );
-        assert_eq!(c.terminals, vec![
-            "net.kovidgoyal.kitty".to_string(),
-            "com.mitchellh.ghostty".to_string(),
-            "com.googlecode.iterm2".to_string(),
-        ], "пустой список терминалов должен быть заменён на умолчания");
+        assert_eq!(c.terminals, default_terminals(),
+            "пустой список терминалов должен быть заменён на умолчания");
     }
 
     #[test]
@@ -400,11 +411,8 @@ mod tests {
             "mac-host",
         );
         assert_eq!(c.ssh_host, "remote-host", "sshHost должен выжить при ошибке в другом поле");
-        assert_eq!(c.terminals, vec![
-            "net.kovidgoyal.kitty".to_string(),
-            "com.mitchellh.ghostty".to_string(),
-            "com.googlecode.iterm2".to_string(),
-        ], "неправильно типизированное поле terminals должно получить умолчание");
+        assert_eq!(c.terminals, default_terminals(),
+            "неправильно типизированное поле terminals должно получить умолчание");
     }
 
     #[test]
