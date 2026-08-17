@@ -59,6 +59,13 @@ pub fn build_file(
                 "desktop": serde_json::Value::Null,
                 "lastSeen": b.last_seen_ms / 1000,
                 "focusedAt": if b.focused_at_ms == 0 { 0 } else { b.focused_at_ms / 1000 },
+                // Как зовут терминал. Читатель различает по нему строки
+                // поимённо: у kitty и iTerm2 пометка «окно есть» одна и та
+                // же, а вопрос человека к строке — «в чём оно открыто».
+                // Отображаемое имя, а не идентификатор пакета: показывать в
+                // списке `net.kovidgoyal.kitty` нечем. Пустая строка вместо
+                // пропуска — то же правило, что у нулей рядом.
+                "app": b.app,
             }),
         );
     }
@@ -108,9 +115,13 @@ pub fn build_file(
 /// Отпечаток расклада — без времени.
 ///
 /// Считается по тому, что читатель увидит как изменение: набор сессий, их
-/// заголовки, отметка взгляда и умение поднимать окно. `lastSeen` в него не
-/// входит намеренно — он растёт каждый такт, и включив его, мы получили бы
-/// отпечаток, который всегда разный.
+/// заголовки, имя терминала, отметка взгляда и умение поднимать окно.
+/// `lastSeen` в него не входит намеренно — он растёт каждый такт, и включив
+/// его, мы получили бы отпечаток, который всегда разный.
+///
+/// Терминал в отпечатке нужен затем же, зачем заголовок: сессию продолжают в
+/// новом окне другого терминала, заголовок при этом тот же, — и без этой
+/// строки читатель до получаса видел бы букву прежнего.
 ///
 /// `can_focus` подмешан отдельным байтом, а не как часть цикла по сессиям:
 /// поле `focus` в файле — про машину целиком, не про конкретную сессию, и
@@ -126,6 +137,8 @@ pub fn fingerprint(bound: &BTreeMap<String, Bound>, can_focus: bool) -> String {
         out.push_str(sid);
         out.push('\u{1}');
         out.push_str(&b.title);
+        out.push('\u{1}');
+        out.push_str(&b.app);
         out.push('\u{1}');
         out.push_str(&b.focused_at_ms.to_string());
         out.push('\u{2}');
@@ -164,6 +177,7 @@ mod tests {
             title: title.to_string(),
             last_seen_ms,
             focused_at_ms: 9_000,
+            app: "kitty".to_string(),
         });
         m
     }
@@ -213,6 +227,26 @@ mod tests {
         // промолчит.
         let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
         assert!(v["snapshots"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_window_names_its_terminal() {
+        // Единственное, чем читатель отличает kitty от iTerm2 в строке: окно
+        // есть у обоих, и пометка ▣ у них одна и та же. Имя отображаемое, а
+        // не идентификатор пакета — показывать `net.kovidgoyal.kitty` в
+        // списке нечем.
+        let v = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
+        assert_eq!(v["windows"][SID]["app"], "kitty");
+    }
+
+    #[test]
+    fn a_new_terminal_rewrites_the_file_without_waiting_for_the_heartbeat() {
+        // Сессию продолжили в окне другого терминала: заголовок тот же, буква
+        // в списке другая. Не будь имени в отпечатке, читатель до получаса
+        // показывал бы прежнюю.
+        let mut other = bound("ccfzf", 60_000);
+        other.get_mut(SID).unwrap().app = "WezTerm".to_string();
+        assert_ne!(fingerprint(&bound("ccfzf", 60_000), true), fingerprint(&other, true));
     }
 
     #[test]

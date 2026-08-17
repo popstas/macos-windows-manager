@@ -162,7 +162,12 @@ mod imp {
                 // не назвалось ни одно окно, а рядом с такой сессией любое
                 // другое окно снимет заморозку.
                 let nameless = !app_name.is_empty() && title.trim() == app_name;
-                out.push(Seen { id, focused, title, bounds, nameless });
+                // Имя приложения уезжает читателю: он различает по нему
+                // терминалы в строке поимённо (kitty и iTerm2 иначе
+                // неотличимы — пометка «окно есть» у них одна). Клонируется
+                // на каждое окно приложения: строка одна на приложение, а
+                // записей у него несколько.
+                out.push(Seen { id, focused, title, bounds, nameless, app: app_name.clone() });
             }
         }
         reg.retain_seen(&alive);
