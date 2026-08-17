@@ -21,7 +21,9 @@
     background: #2c2c2e; color: #e6e6e6;
     font: inherit;
   }
-  textarea { min-height: 62px; resize: vertical; }
+  /* Четыре строки видно без прокрутки: терминалов у человека обычно столько,
+     и поле на три строки прячет последний за скроллом собственной высоты. */
+  textarea { min-height: 80px; resize: vertical; }
   .hint { color: #999; margin-top: 3px; }
   .note { color: #999; margin: 0 0 8px; }
   /* Форма выросла до четырнадцати полей и больше не помещается на экран
