@@ -73,6 +73,25 @@ pub fn window_item_label(title: &str, app: &str) -> String {
     }
 }
 
+/// Подпись пункта «плитка»: она же и говорит, слушается ли хоткей.
+///
+/// Комбинация показывается правой колонкой всегда — её рисует NSMenuItem по
+/// акселератору, — а вот встала ли она на самом деле, колонка не знает: занять
+/// сочетание могло любое чужое приложение, и молча мёртвая клавиша выглядит
+/// сломанным конфигом. Потому отказ и называет подпись, а не колонка. То же
+/// правило, что у `show_item_label` в пикере.
+///
+/// Знак и волосяные пробелы перед подписью — забота вызывающего: они одни на
+/// обе подписи, и повторять их здесь значило бы держать вторую копию мерок,
+/// снятых со шрифта меню.
+pub fn tile_item_label(hotkey_registered: bool) -> &'static str {
+    if hotkey_registered {
+        "Tile windows"
+    } else {
+        "Tile windows (hotkey is taken)"
+    }
+}
+
 /// Обрезка по знакам, а не по байтам: заголовок сессии бывает и кириллицей, а
 /// срез по байтам посреди буквы — это паника, а не длинный пункт меню.
 fn ellipsize(text: &str, limit: usize) -> String {
@@ -86,6 +105,14 @@ fn ellipsize(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Про занятый хоткей меню говорит подписью: колонка акселератора рисует
+    /// комбинацию в обоих случаях и отличить их не может.
+    #[test]
+    fn tile_label_tells_when_the_hotkey_is_taken() {
+        assert_eq!(tile_item_label(true), "Tile windows");
+        assert_ne!(tile_item_label(false), tile_item_label(true));
+    }
     use chrono::{NaiveDate, NaiveDateTime};
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {

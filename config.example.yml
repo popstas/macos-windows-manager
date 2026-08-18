@@ -26,6 +26,13 @@ terminals:
   - com.googlecode.iterm2
   - com.github.wez.wezterm
 
+# Global hotkey for `Tile windows`: the same layout the tray item asks for.
+# Takes effect on restart, unlike the switches below — the hotkey is registered
+# once, at startup.
+# Not set — Cmd+Alt+Ctrl+C. A combination the system or another application
+# already holds does not take: the tray item then says so in its label.
+# tileHotkey: Cmd+Alt+Ctrl+C
+
 # Feature switches. Every one of them defaults to on: a config written before
 # this block existed must keep behaving exactly as it did.
 #
