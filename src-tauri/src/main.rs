@@ -925,58 +925,6 @@ fn ask(app: &tauri::AppHandle, mode: mwm_core::layout::Layout) {
     }
 }
 
-/// Поставить глобальный хоткей раскладки плиткой.
-///
-/// Возвращает то же, что показывает меню: встал ли хоткей и на какой
-/// комбинации. Пара, а не одно значение, потому что комбинация уезжает в
-/// правую колонку пункта в обоих случаях, а вот подпись при отказе другая —
-/// иначе мёртвая клавиша выглядела бы сломанным конфигом.
-///
-/// Непонятая строка откатывается на умолчание здесь, а не в `parse_config`:
-/// понимает комбинацию плагин, а он живёт в приложении, и `mwm-core` про
-/// клавиатуру не знает вовсе.
-///
-/// Обработчик шлёт ту же просьбу, что и пункт меню, — тем же каналом и в тот
-/// же поток трекера: две дороги к одной раскладке разошлись бы на первой же
-/// правке.
-#[cfg(desktop)]
-fn register_tile_hotkey(app: &tauri::AppHandle, wanted: &str) -> (bool, String) {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-    let (shortcut, accelerator) = match wanted.parse::<Shortcut>() {
-        Ok(sc) => (sc, wanted.to_string()),
-        Err(e) => {
-            mwm_log!("cannot parse tileHotkey {wanted}: {e}, using default");
-            let fallback = mwm_core::config::DEFAULT_TILE_HOTKEY;
-            match fallback.parse::<Shortcut>() {
-                Ok(sc) => (sc, fallback.to_string()),
-                // Умолчание не разобралось — это ошибка в самом умолчании, и
-                // молчать о ней нельзя, но и падать незачем: трей с рабочим
-                // пунктом меню полезнее, чем не поднявшееся приложение.
-                Err(e) => {
-                    mwm_log!("default hotkey {fallback} does not parse: {e}");
-                    return (false, fallback.to_string());
-                }
-            }
-        }
-    };
-    let registered = match app.global_shortcut().on_shortcut(shortcut, |app, _sc, event| {
-        // Только нажатие: без проверки одна и та же комбинация просила бы о
-        // раскладке дважды — второй раз на отпускании.
-        if event.state() == ShortcutState::Pressed {
-            ask(app, mwm_core::layout::Layout::Tile);
-        }
-    }) {
-        Ok(()) => true,
-        Err(e) => {
-            // Отказ не фатален и обязан быть виден: сочетание мог занять кто
-            // угодно, и человек об этом узнает только из подписи пункта.
-            mwm_log!("cannot register tile hotkey {accelerator}: {e}");
-            false
-        }
-    };
-    (registered, accelerator)
-}
-
 /// Время сборки этого бинаря, если оно в него вшито.
 ///
 /// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
@@ -996,9 +944,6 @@ fn build_time() -> Option<chrono::NaiveDateTime> {
 
 fn main() {
     tauri::Builder::default()
-        // Плагин хоткеев — единственный способ услышать клавишу, когда впереди
-        // чужое приложение: у трея окон нет вовсе, и слушать некому.
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
@@ -1061,14 +1006,10 @@ fn main() {
             // пропадал через такт рисовальщика.
             let trusted_now = ax::trusted();
             let trusted = Trusted(Arc::new(AtomicBool::new(trusted_now)));
-            // Конфиг читается до сборки меню: от него зависит комбинация в
-            // правой колонке пункта плитки, а от того, встала ли она, — его
-            // подпись. Прочитанное уезжает дальше в ячейку трекера: второе
-            // чтение разошлось бы с первым, правь человек файл в этот
-            // промежуток.
+            // Конфиг читается до сборки меню и уезжает дальше в ячейку
+            // трекера: второе чтение разошлось бы с первым, правь человек файл
+            // в этот промежуток.
             let config = load_config();
-            let (hotkey_registered, hotkey_accelerator) =
-                register_tile_hotkey(app.handle(), &config.tile_hotkey);
             // Раскладка без разрешения не сработает — двигать окна нечем, — и
             // пункт заводится сразу неактивным, чтобы человек не нажимал в
             // пустоту. Гаснет и загорается он там же, где приходит и уходит
@@ -1091,16 +1032,18 @@ fn main() {
             //
             // Остаток расхождения — не больше 0,4 pt, треть волосяного пробела.
             //
-            // Комбинация уходит в нативный слот акселератора, а не в подпись:
-            // NSMenuItem рисует её правой колонкой сам, знаками клавиш (⌃⌥⌘C),
-            // и приписать её к подписи значило бы получить эту же строку словами
-            // посреди пункта.
+            // Акселератора у пункта нет: глобальный хоткей плитки принадлежит
+            // пикеру (`tileHotkey` в его `config.yaml`) — порядок окон знает
+            // только тот, кто показывает список, а отсюда просьба уходила без
+            // `ids`, то есть своим порядком. Назови мы комбинацию здесь,
+            // NSMenuItem нарисовал бы правой колонкой клавишу, которую это
+            // приложение не слушает.
             let tile = MenuItem::with_id(
                 app,
                 "tile",
-                format!("\u{25a6}\u{200a} {}", mwm_core::status::tile_item_label(hotkey_registered)),
+                "\u{25a6}\u{200a} Tile windows",
                 trusted_now,
-                Some(hotkey_accelerator.as_str()),
+                None::<&str>,
             )?;
             let cascade = MenuItem::with_id(
                 app,
@@ -1438,7 +1381,7 @@ mod tests {
         for key in [
             "placement", "snapshots", "requests", "localSource",
             "sshHost", "remoteDir", "windowHost",
-            "terminals", "tickMs", "dumpCacheMs", "tileHotkey",
+            "terminals", "tickMs", "dumpCacheMs",
             "host", "port", "user", "password", "base",
         ] {
             assert!(page.contains(key), "поле {key} пропало из формы");
@@ -1625,15 +1568,11 @@ mod tests {
         // Пробелы после значка — подгонка ширины под самый широкий знак; их
         // число разное и проверяется соседним тестом.
         let hair = "\\u{200a}";
-        // Плитка проверяется не тем же способом: её подпись собирается
-        // `format!` — она зависит от того, встал ли хоткей, — и литерала с
-        // подписью в исходнике нет вовсе. Сторожится то же самое: значок с
-        // подгонкой перед подстановкой, а подпись — там, где живёт.
-        let tile_icon = "\\u{25a6}";
-        let want = format!("\"{tile_icon}{hair} {{}}\"");
-        assert!(src.contains(&want), "у пункта плитки нет значка с подгонкой: {want}");
-        assert_eq!(mwm_core::status::tile_item_label(true), "Tile windows");
         for (icon, pad, label) in [
+            // Плитка проверяется наравне с остальными с тех пор, как её
+            // подпись перестала зависеть от хоткея: глобальную клавишу
+            // раскладки теперь держит пикер, и `format!` с развилкой ушёл.
+            ("\\u{25a6}", 1, "Tile windows"),
             ("\\u{2750}", 2, "Cascade windows"),
             ("\\u{2699}", 5, "Settings"),
             ("\\u{26bf}", 2, "Grant Accessibility…"),

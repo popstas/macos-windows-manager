@@ -84,11 +84,6 @@ pub struct Config {
     pub snapshots_debounce_ms: u64,
     /// Выключатели фич. Пустой блок значит «всё включено».
     pub features: Features,
-    /// Глобальный хоткей раскладки плиткой — строкой, как её пишет человек.
-    /// Пустое поле значит «взять умолчание», а не «без хоткея»: выключателем
-    /// служит блок `features`, и второго способа выключить одно и то же
-    /// заводить незачем.
-    pub tile_hotkey: String,
 }
 
 /// Терминалы, чьи окна считаются терминалами, пока человек не сказал иначе.
@@ -106,14 +101,6 @@ pub fn default_terminals() -> Vec<String> {
         "com.github.wez.wezterm".to_string(),
     ]
 }
-
-/// Хоткей плитки, пока человек не сказал иначе.
-///
-/// Строка, а не разобранная комбинация: `mwm-core` про клавиатуру ничего не
-/// знает и знать не должен — разбирает её `main.rs`, где живёт плагин. Здесь
-/// умолчание лежит затем, чтобы его называли одним и тем же и конфиг, и
-/// подпись пункта меню.
-pub const DEFAULT_TILE_HOTKEY: &str = "Cmd+Alt+Ctrl+C";
 
 /// Разобрать конфиг, подставив умолчания всему, чего в нём нет.
 ///
@@ -184,17 +171,6 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         .get("dumpCacheMs")
         .and_then(|v| v.as_u64())
         .unwrap_or(15_000);
-
-    // Проверять комбинацию здесь нечем: понимает её плагин хоткеев, а он
-    // живёт в приложении. Непонятая строка откатывается на умолчание там же,
-    // где разбирается, — и там же о ней говорит в лог.
-    let tile_hotkey = map
-        .get("tileHotkey")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_TILE_HOTKEY)
-        .to_string();
 
     // Блок читается по полям, как и всё остальное: опечатка в порту не должна
     // стоить адреса брокера. Отсутствующий или не-словарь блок даёт
@@ -285,7 +261,6 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         snapshots_keep,
         snapshots_debounce_ms,
         features,
-        tile_hotkey,
     }
 }
 
@@ -306,7 +281,6 @@ pub fn to_json(cfg: &Config) -> serde_json::Value {
         "terminals": cfg.terminals,
         "tickMs": cfg.tick_ms,
         "dumpCacheMs": cfg.dump_cache_ms,
-        "tileHotkey": cfg.tile_hotkey,
         "mqtt": {
             "host": cfg.mqtt.host,
             "port": cfg.mqtt.port,
@@ -377,26 +351,6 @@ mod tests {
             "com.googlecode.iterm2".to_string(),
             "com.github.wez.wezterm".to_string(),
         ]);
-    }
-
-    #[test]
-    fn tile_hotkey_falls_back_to_the_default_when_nothing_is_said() {
-        // Три способа не сказать ничего, и все три значат одно. Пустая строка
-        // — не «без хоткея»: выключателем служит блок `features`, а пустое
-        // поле в окне настроек человек оставляет, не выбирая ничего.
-        for text in ["", "tileHotkey: \"\"\n", "tileHotkey: \"   \"\n"] {
-            let c = parse_config(text, "mac-host");
-            assert_eq!(c.tile_hotkey, DEFAULT_TILE_HOTKEY, "конфиг {text:?}");
-        }
-    }
-
-    #[test]
-    fn tile_hotkey_from_the_config_wins() {
-        // Комбинация едет наружу как написана: понимает её плагин хоткеев, а
-        // приводить строку к какому-нибудь общему виду значило бы показывать
-        // человеку в меню не то, что он написал в файле.
-        let c = parse_config("tileHotkey: Cmd+Shift+T\n", "mac-host");
-        assert_eq!(c.tile_hotkey, "Cmd+Shift+T");
     }
 
     #[test]
