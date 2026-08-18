@@ -873,7 +873,10 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
             tauri::WebviewUrl::App("settings.html".into()),
         )
         .title("macos-windows-manager Settings")
-        .inner_size(560.0, 620.0)
+        // Шире прежних 560 ровно на боковой список вкладок и ниже прежних
+        // 620: длиннее пяти полей вкладки в форме нет, и высота под все
+        // четырнадцать разом теперь ни к чему.
+        .inner_size(720.0, 560.0)
         .center()
         .resizable(true)
         .build()
@@ -1427,6 +1430,16 @@ mod tests {
             page.contains("after restart"),
             "группа MQTT обязана честно говорить, что действует после перезапуска"
         );
+        // Группы разъехались по вкладкам, и вкладка заводится по `id` группы.
+        // Забудь его — `renderTabs` нарисует пункт с `data-tab="undefined"`, и
+        // с экрана пропадёт не одно поле, а вся группа разом. Сторож выше
+        // такого не поймает: ключи-то в тексте остались.
+        for line in page.lines().filter(|line| line.contains("title: '")) {
+            assert!(
+                line.contains("id: '"),
+                "группа без id останется без вкладки и не покажется: {line}"
+            );
+        }
     }
 
     #[test]
