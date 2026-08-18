@@ -6,12 +6,41 @@
 <style>
   :root { color-scheme: dark; }
   body {
-    margin: 0; padding: 18px 22px 0;
+    margin: 0; padding: 0;
+    display: flex; height: 100vh;
     font: 13px -apple-system, system-ui, sans-serif;
     background: #1c1c1e; color: #e6e6e6;
   }
-  h2 { font-size: 13px; font-weight: 600; margin: 18px 0 4px; }
-  h2:first-child { margin-top: 0; }
+  /* Список вкладок слева, страница справа. Вкладка — это та же группа полей,
+     что была здесь и раньше, просто показанная по одной: четырнадцать полей
+     в окно разом не помещаются. */
+  #tabs {
+    width: 170px; flex: none; box-sizing: border-box;
+    padding: 12px 0; overflow-y: auto;
+    background: #242426; border-right: 1px solid #3a3a3c;
+  }
+  .tab { padding: 6px 14px 6px 22px; cursor: default; color: #bbb; }
+  .tab.active { background: #0a84ff; color: #fff; }
+  main {
+    flex: 1; min-width: 0; overflow-y: auto;
+    box-sizing: border-box; padding: 18px 22px 0;
+  }
+  /* Страницы все до одной лежат в DOM, спрятана лишь неактивная. Рисуй мы
+     только открытую — `collect()` искал бы `getElementById` полей соседних
+     вкладок и падал бы на `null` при первом же Save. */
+  section[data-tab] { display: none; }
+  section[data-tab].active { display: block; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+  /* Лог прокручивается сам, а не страницей: строк в буфере тысяча, и уедь они
+     страницей — вместе с ними уехал бы липкий footer с кнопкой Save. */
+  #log-view {
+    margin: 0; height: 380px; overflow: auto;
+    box-sizing: border-box; padding: 8px;
+    border: 1px solid #3a3a3c; border-radius: 4px;
+    background: #2c2c2e; color: #d6d6d6;
+    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
   .field { margin-bottom: 10px; }
   .field label { display: block; margin-bottom: 3px; }
   .field.check label { display: inline; }
@@ -26,8 +55,8 @@
   textarea { min-height: 80px; resize: vertical; }
   .hint { color: #999; margin-top: 3px; }
   .note { color: #999; margin: 0 0 8px; }
-  /* Форма выросла до четырнадцати полей и больше не помещается на экран
-     целиком: кнопка, уехавшая под сгиб, читается как её отсутствие. */
+  /* Липким footer остаётся и со вкладками: у Windows под textarea высота
+     гуляет, а кнопка, уехавшая под сгиб, читается как её отсутствие. */
   footer {
     position: sticky; bottom: 0;
     margin-top: 14px; padding: 12px 0;
@@ -38,8 +67,11 @@
 </style>
 </head>
 <body>
-<div id="form"></div>
-<footer><button id="save">Save</button><span id="status"></span></footer>
+<nav id="tabs"></nav>
+<main>
+  <div id="form"></div>
+  <footer><button id="save">Save</button><span id="status"></span></footer>
+</main>
 <script>
 (async function () {
   const invoke = (cmd, args) => (window.__TAURI__
@@ -53,7 +85,7 @@
   // зачем их менять, а слияние патча по ключам сохранит их нетронутыми и без
   // редактора.
   const GROUPS = [
-    { title: 'Features', fields: [
+    { id: 'features', title: 'Features', fields: [
       ['features.placement', 'check', 'Place windows where they were',
         'When a session’s window shows up again, put it back where that session '
         + 'had it last time. Switched off, windows stay where the system opened them; '
@@ -75,12 +107,12 @@
         + 'match the window title against. Costs nothing on a machine that keeps no '
         + 'aggregator of its own — there is no local list to read.'],
     ]},
-    { title: 'Connection', fields: [
+    { id: 'connection', title: 'Connection', fields: [
       ['sshHost', 'text', 'Machine where sessions and the aggregator live'],
       ['remoteDir', 'text', 'Directory of tracker files on that machine'],
       ['windowHost', 'text', 'Name of this machine, as the picker knows it'],
     ]},
-    { title: 'Windows',
+    { id: 'windows', title: 'Windows',
       note: 'Only windows of these applications are tracked; everything else is left alone.',
       fields: [
         ['terminals', 'lines', 'Bundle ids counted as terminals, one per line'],
@@ -90,13 +122,22 @@
           'Hotkey for Tile windows, takes effect after restart. Empty means the '
           + 'built-in Cmd+Alt+Ctrl+C.'],
       ]},
-    { title: 'MQTT', note: 'Takes effect after restart.', fields: [
+    { id: 'mqtt', title: 'MQTT', note: 'Takes effect after restart.', fields: [
       ['mqtt.host', 'text', 'Broker address'],
       ['mqtt.port', 'number', 'Broker port'],
       ['mqtt.user', 'text', 'User'],
       ['mqtt.password', 'password', 'Leave empty to keep the stored one'],
       ['mqtt.base', 'text', 'Topic prefix of this machine'],
     ]},
+    // Единственная вкладка без полей: она ничего не правит в config.yaml, а
+    // показывает буфер лога. `collect()` проходит её вхолостую — список полей
+    // пуст, — и трогать его ради неё не пришлось.
+    //
+    // Заведена затем, что запущенное из `.app` приложение stderr отдаёт
+    // некуда, и на вопрос «почему трекер притих» смотреть было не во что.
+    { id: 'log', title: 'Log', fields: [],
+      note: 'What this app has written since it started. Newest at the bottom.',
+      body: '<pre id="log-view"></pre>' },
   ];
 
   const status = document.getElementById('status');
@@ -133,6 +174,56 @@
     return `in effect: ${Array.isArray(value) ? value.join(', ') : value}`;
   }
 
+  // Открытая вкладка живёт снаружи `render()`: форма перерисовывается после
+  // каждого удачного Save, и без этого человека выбрасывало бы на Features с
+  // той самой вкладки, где он только что сохранился.
+  let active = GROUPS[0].id;
+
+  function renderTabs() {
+    document.getElementById('tabs').innerHTML = GROUPS.map((group) =>
+      `<div class="tab${group.id === active ? ' active' : ''}" data-tab="${group.id}"
+        >${escape(group.title)}</div>`).join('');
+  }
+
+  // Опрос, а не событие Tauri: подписка потребовала бы `AppHandle` там, где
+  // сейчас голый макрос `mwm_log!`, — в том числе в `mwm-core`, который про
+  // Tauri не знает и знать не должен. Секунда — такт трекера; чаще незачем.
+  let logTimer = null;
+
+  async function refreshLog() {
+    const view = document.getElementById('log-view');
+    if (!view) return;
+    const lines = await invoke('read_log') || [];
+    const text = lines.length ? lines.join('\n') : 'nothing logged yet';
+    // Молчаливый такт не трогает узел вовсе: перезапись того же текста сбивала
+    // бы выделение под курсором раз в секунду — а лог читают, выделяя строки.
+    if (text === view.textContent) return;
+    // Прокрутка едет вниз, только если человек и так был внизу. Уехал он
+    // читать старую строку — дёргать его под низ каждую секунду значило бы не
+    // дать дочитать.
+    const atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 20;
+    view.textContent = text;
+    if (atBottom) view.scrollTop = view.scrollHeight;
+  }
+
+  // Один обход на оба списка: `data-tab` стоит и на вкладке, и на её странице,
+  // так что переключение — это переставленный класс, а не перерисовка. Узлы
+  // при этом не исчезают, и `collect()` по-прежнему находит все поля.
+  function show(id) {
+    active = id;
+    for (const node of document.querySelectorAll('[data-tab]')) {
+      node.classList.toggle('active', node.dataset.tab === id);
+    }
+    // Опрос живёт ровно столько, сколько вкладка видна: спрошенный вслепую лог
+    // держал бы окно настроек в работе всё время, пока оно открыто.
+    clearInterval(logTimer);
+    logTimer = null;
+    if (id === 'log') {
+      refreshLog();
+      logTimer = setInterval(refreshLog, 1000);
+    }
+  }
+
   function render() {
     document.getElementById('form').innerHTML = GROUPS.map((group) => {
       const note = group.note ? `<p class="note">${escape(group.note)}</p>` : '';
@@ -157,8 +248,14 @@
           ${hint ? `<div class="hint">${escape(hint)}</div>` : ''}
         </div>`;
       }).join('');
-      return `<h2>${escape(group.title)}</h2>${note}${fields}`;
+      return `<section data-tab="${group.id}">
+        <h2>${escape(group.title)}</h2>${note}${fields}${group.body || ''}
+      </section>`;
     }).join('');
+    renderTabs();
+    // Классы и опрос лога ставит `show`, а не разметка: иначе перерисовка
+    // после Save оставила бы таймер крутиться над узлом, которого уже нет.
+    show(active);
   }
 
   async function load() {
@@ -228,6 +325,11 @@
     }
     return { patch };
   }
+
+  document.getElementById('tabs').addEventListener('click', (event) => {
+    const tab = event.target.closest('.tab');
+    if (tab) show(tab.dataset.tab);
+  });
 
   document.getElementById('save').addEventListener('click', async () => {
     const { patch, error } = collect();

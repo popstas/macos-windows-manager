@@ -5,6 +5,7 @@
 //! другого.
 
 use crate::geometry::Bounds;
+use crate::mwm_log;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -113,9 +114,9 @@ pub fn read_state(path: &Path) -> BTreeMap<String, SlotState> {
         // ещё пригодиться тому, кто будет разбираться.
         let bak = aside_path(path);
         if let Err(e) = std::fs::rename(path, &bak) {
-            eprintln!("mwm: broken state file, and moving it aside failed: {e}");
+            mwm_log!("broken state file, and moving it aside failed: {e}");
         } else {
-            eprintln!("mwm: broken state file, moved to {}", bak.display());
+            mwm_log!("broken state file, moved to {}", bak.display());
         }
         return BTreeMap::new();
     }

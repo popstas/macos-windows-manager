@@ -8,6 +8,7 @@ pub mod diag;
 pub mod geometry;
 pub mod index;
 pub mod layout;
+pub mod log;
 pub mod permissions;
 pub mod request;
 pub mod snapshots;

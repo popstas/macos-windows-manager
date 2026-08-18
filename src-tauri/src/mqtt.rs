@@ -10,6 +10,7 @@
 //! поток трекера.
 
 use mwm_core::config::MqttConfig;
+use mwm_core::mwm_log;
 use mwm_core::request::{command_from_topic, parse_request, Request};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,7 +66,7 @@ fn run(cfg: MqttConfig, tx: Sender<Request>, live: Arc<AtomicBool>) {
         }
         let (client, mut connection) = Client::new(opts, 16);
         if let Err(e) = client.subscribe(&filter, QoS::AtMostOnce) {
-            eprintln!("mwm: subscribe failed: {e}");
+            mwm_log!("subscribe failed: {e}");
             live.store(false, Ordering::Relaxed);
             std::thread::sleep(RETRY);
             continue;
@@ -93,7 +94,7 @@ fn run(cfg: MqttConfig, tx: Sender<Request>, live: Arc<AtomicBool>) {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("mwm: mqtt connection lost: {e}");
+                    mwm_log!("mqtt connection lost: {e}");
                     live.store(false, Ordering::Relaxed);
                     break;
                 }
