@@ -84,7 +84,7 @@ type Drawn = Arc<Mutex<(Vec<String>, Vec<MenuItem<tauri::Wry>>)>>;
 /// Список окон вставляется по номеру, и номер этот считается от места, где
 /// кончились пункты с постоянным местом. Забудь про них счёт — список встал бы
 /// поверх кнопок.
-const LAYOUT_ITEMS: usize = 1;
+const LAYOUT_ITEMS: usize = 2;
 
 /// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
 ///
@@ -895,15 +895,17 @@ fn main() {
             // пункт «выдать разрешение».
             let tile =
                 MenuItem::with_id(app, "tile", "Tile windows", trusted_now, None::<&str>)?;
+            let cascade =
+                MenuItem::with_id(app, "cascade", "Cascade windows", trusted_now, None::<&str>)?;
             // `Settings…` встаёт над `Quit`, и `GRANT_POSITION` от этого не
             // меняется: приходящий и уходящий пункт по-прежнему второй сверху.
             // Пункты раскладки встают под `GRANT_POSITION`, а список окон —
             // под ними: у кнопки место постоянное, а список растёт и тает от
             // числа окон, и кнопка уезжала бы у человека из-под курсора.
             let menu = if trusted_now {
-                Menu::with_items(app, &[&state, &tile, &settings, &quit, &version])?
+                Menu::with_items(app, &[&state, &tile, &cascade, &settings, &quit, &version])?
             } else {
-                Menu::with_items(app, &[&state, &grant, &tile, &settings, &quit, &version])?
+                Menu::with_items(app, &[&state, &grant, &tile, &cascade, &settings, &quit, &version])?
             };
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
@@ -930,6 +932,7 @@ fn main() {
                         });
                     }
                     "tile" => ask(app, mwm_core::layout::Layout::Tile),
+                    "cascade" => ask(app, mwm_core::layout::Layout::Cascade),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1001,6 +1004,7 @@ fn main() {
                     let drawn = drawn.clone();
                     let app = handle_for_items.clone();
                     let tile = tile.clone();
+                    let cascade = cascade.clone();
                     move || {
                         let _ = state.set_text(&text);
                         match toggle {
@@ -1012,10 +1016,12 @@ fn main() {
                             Some(true) => {
                                 let _ = menu.insert(&grant, GRANT_POSITION);
                                 let _ = tile.set_enabled(false);
+                                let _ = cascade.set_enabled(false);
                             }
                             Some(false) => {
                                 let _ = menu.remove(&grant);
                                 let _ = tile.set_enabled(true);
+                                let _ = cascade.set_enabled(true);
                             }
                             None => {}
                         }
@@ -1323,9 +1329,13 @@ mod tests {
             "список окон вставляется под пунктами раскладки"
         );
         assert_eq!(
-            src.matches("&tile,").count(),
+            src.matches("&tile, &cascade,").count(),
             2,
-            "пункт стоит в обеих сборках меню — с разрешением и без"
+            "оба пункта стоят в обеих сборках меню — с разрешением и без"
+        );
+        assert_eq!(
+            super::LAYOUT_ITEMS, 2,
+            "счёт пунктов раскладки совпадает с их числом в меню"
         );
     }
 
@@ -1337,8 +1347,8 @@ mod tests {
         let branch = src.split("Some(true) => {").nth(1).unwrap_or("");
         let head = branch.split("Some(false)").next().unwrap_or("");
         assert!(
-            head.contains("tile.set_enabled(false)"),
-            "пункт гаснет там же, где приходит пункт «выдать разрешение»"
+            head.contains("tile.set_enabled(false)") && head.contains("cascade.set_enabled(false)"),
+            "оба пункта гаснут там же, где приходит пункт «выдать разрешение»"
         );
     }
 

@@ -12,6 +12,8 @@ use crate::geometry::Bounds;
 pub enum Layout {
     /// Сетка без перекрытий.
     Tile,
+    /// Стопка со сдвигом: окна одного размера, у каждого виден заголовок.
+    Cascade,
 }
 
 impl Layout {
@@ -19,6 +21,7 @@ impl Layout {
     pub fn from_name(name: &str) -> Option<Layout> {
         match name.trim().to_ascii_lowercase().as_str() {
             "tile" => Some(Layout::Tile),
+            "cascade" => Some(Layout::Cascade),
             _ => None,
         }
     }
@@ -80,7 +83,43 @@ pub fn arrange(mode: Layout, screen: Bounds, n: usize) -> Vec<Bounds> {
     }
     match mode {
         Layout::Tile => tile(work, n),
+        Layout::Cascade => cascade(work, n),
     }
+}
+
+/// Сдвиг стопки вниз — высота заголовка окна.
+///
+/// Меньше нельзя, и это всё содержание каскада: заголовок — единственное, по
+/// чему человек выбирает окно из стопки мышью. Накрой соседнее окно заголовок —
+/// и стопка превращается в одно верхнее окно с полосками по краю.
+const STEP_Y: i32 = 28;
+
+/// Сдвиг стопки вправо. Заголовку не нужен, но без него окна сливаются в одну
+/// колонку, и глазом стопка не читается.
+const STEP_X: i32 = 36;
+
+/// Стопка со сдвигом вправо и вниз.
+///
+/// Все окна одного размера — половина экрана по каждой стороне. Кончится место
+/// на экране — стопка начинается заново от левого верхнего угла: окон, которым
+/// не хватило места на ступеньках, к этому времени полтора десятка, и экрану
+/// уже нечего им предложить, как ни считай.
+fn cascade(work: Bounds, n: usize) -> Vec<Bounds> {
+    let w = work.width / 2;
+    let h = work.height / 2;
+    // Сколько ступенек помещается: по той стороне, где место кончится раньше.
+    let per_stack = 1 + (((work.height - h) / STEP_Y).min((work.width - w) / STEP_X)).max(0);
+    (0..n as i32)
+        .map(|i| {
+            let step = i % per_stack;
+            Bounds {
+                x: work.x + step * STEP_X,
+                y: work.y + step * STEP_Y,
+                width: w,
+                height: h,
+            }
+        })
+        .collect()
 }
 
 /// Сетка без перекрытий.
@@ -151,7 +190,67 @@ mod tests {
     fn names_from_the_request_are_understood() {
         assert_eq!(Layout::from_name("tile"), Some(Layout::Tile));
         assert_eq!(Layout::from_name("  TILE  "), Some(Layout::Tile));
+        assert_eq!(Layout::from_name("cascade"), Some(Layout::Cascade));
         assert_eq!(Layout::from_name("mosaic"), None);
+    }
+
+    #[test]
+    fn a_cascade_window_is_half_the_screen() {
+        let got = arrange(Layout::Cascade, WIDE, 3);
+        let work_h = WIDE.height - MENUBAR_PT;
+        assert!(got.iter().all(|b| b.width == WIDE.width / 2 && b.height == work_h / 2), "{got:?}");
+    }
+
+    #[test]
+    fn every_cascade_window_shows_its_title() {
+        // Соль каскада: заголовок — единственное, по чему человек выбирает окно
+        // из стопки мышью. Сдвиг меньше высоты заголовка накрыл бы его соседним
+        // окном, и стопка стала бы одним верхним окном с полосками по краю.
+        let got = arrange(Layout::Cascade, WIDE, 5);
+        for pair in got.windows(2) {
+            assert!(pair[1].y - pair[0].y >= STEP_Y, "{:?} накрывает заголовок {:?}", pair[1], pair[0]);
+            assert!(pair[1].x > pair[0].x, "стопка сдвигается и вправо: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_cascade_starts_below_the_menu_bar() {
+        let got = arrange(Layout::Cascade, WIDE, 1);
+        assert_eq!(got[0].x, WIDE.x);
+        assert_eq!(got[0].y, MENUBAR_PT);
+    }
+
+    #[test]
+    fn no_cascade_window_hangs_off_the_screen() {
+        // Ступеньки уводят окна вправо и вниз, и без счёта места последнее
+        // уехало бы за край — туда, где мышью его не достать.
+        for n in 1..=40 {
+            for screen in [LAPTOP, WIDE] {
+                let work_bottom = screen.y + screen.height;
+                for b in arrange(Layout::Cascade, screen, n) {
+                    assert!(b.x + b.width <= screen.x + screen.width, "{n}: {b:?}");
+                    assert!(b.y + b.height <= work_bottom, "{n}: {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stack_that_ran_out_of_room_begins_anew() {
+        // Экран, на котором ступенек помещается всего семь. Восьмое окно
+        // начинает стопку заново от угла: место на ступеньках кончилось, и
+        // предложить ему экрану больше нечего.
+        let small = Bounds { x: 0, y: 0, width: 1000, height: 400 };
+        let got = arrange(Layout::Cascade, small, 9);
+        assert_eq!(got[7], got[0], "восьмое окно встало на место первого");
+        assert_eq!(got[8], got[1]);
+    }
+
+    #[test]
+    fn a_second_screen_holds_the_cascade_too() {
+        let right = Bounds { x: 1440, y: 0, width: 1440, height: 900 };
+        let got = arrange(Layout::Cascade, right, 4);
+        assert!(got.iter().all(|b| b.x >= right.x), "{got:?}");
     }
 
     #[test]
