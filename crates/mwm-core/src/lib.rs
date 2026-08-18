@@ -7,6 +7,7 @@ pub mod config;
 pub mod diag;
 pub mod geometry;
 pub mod index;
+pub mod layout;
 pub mod permissions;
 pub mod request;
 pub mod snapshots;

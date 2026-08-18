@@ -13,7 +13,7 @@ use mwm_core::config::MqttConfig;
 use mwm_core::request::{command_from_topic, parse_request, Request};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,12 +23,7 @@ use std::time::Duration;
 const RETRY: Duration = Duration::from_secs(5);
 
 pub struct Link {
-    pub requests: Receiver<Request>,
     live: Arc<AtomicBool>,
-    /// Свой конец канала, который никуда не отдан. Он держит канал открытым:
-    /// умри поток подписки, `recv_timeout` у читателя начал бы возвращать
-    /// `Disconnected` мгновенно, и такт трекера превратился бы в горячий цикл.
-    _keepalive: Sender<Request>,
 }
 
 impl Link {
@@ -44,17 +39,19 @@ impl Link {
 
 /// Поднять подписку. Ненастроенный брокер — не отказ: канал просто молчит, а
 /// `is_live()` всегда отвечает «нет».
-pub fn spawn(cfg: &MqttConfig) -> Link {
-    let (tx, rx) = channel::<Request>();
+///
+/// Канал заводит не этот модуль: тот же конец нужен пунктам меню трея, а те
+/// живут на главном потоке. Отсюда и `tx` в аргументах — подписка лишь один из
+/// двух источников просьб.
+pub fn spawn(cfg: &MqttConfig, tx: Sender<Request>) -> Link {
     let live = Arc::new(AtomicBool::new(false));
     if !cfg.is_configured() {
-        return Link { requests: rx, live, _keepalive: tx.clone() };
+        return Link { live };
     }
-    let worker_tx = tx.clone();
     let worker_live = live.clone();
     let cfg = cfg.clone();
-    std::thread::spawn(move || run(cfg, worker_tx, worker_live));
-    Link { requests: rx, live, _keepalive: tx }
+    std::thread::spawn(move || run(cfg, tx, worker_live));
+    Link { live }
 }
 
 fn run(cfg: MqttConfig, tx: Sender<Request>, live: Arc<AtomicBool>) {

@@ -377,6 +377,24 @@ mod imp {
     /// display in the global display coordinate space»), уже отдаёт
     /// координаты в той же системе, что и Accessibility — переворачивать `y`
     /// самим не нужно.
+    /// Главный экран — тот, на котором полоса меню.
+    ///
+    /// Раскладка спрашивает именно его, а не первый из списка: порядок
+    /// `CGGetActiveDisplayList` главный экран вперёд не обещает, и на второй
+    /// машине окна уехали бы на соседний монитор без всякой видимой причины.
+    pub fn main_display() -> Option<Display> {
+        let r = CGDisplay::main().bounds();
+        let bounds = Bounds {
+            x: r.origin.x as i32,
+            y: r.origin.y as i32,
+            width: r.size.width as i32,
+            height: r.size.height as i32,
+        };
+        // Нулевой прямоугольник — не экран: раскладка по нему разложила бы
+        // окна в точку.
+        (bounds.width > 0 && bounds.height > 0).then_some(Display { bounds })
+    }
+
     pub fn displays() -> Vec<Display> {
         let ids = match CGDisplay::active_displays() {
             Ok(ids) => ids,
@@ -421,8 +439,10 @@ mod imp {
         Err("placing windows is available on macOS only".to_string())
     }
     pub fn displays() -> Vec<Display> { Vec::new() }
+    pub fn main_display() -> Option<Display> { None }
 }
 
 pub use imp::{
-    activate_self, displays, list_windows, place, prompt_for_trust, raise, trusted, Registry,
+    activate_self, displays, list_windows, main_display, place, prompt_for_trust, raise, trusted,
+    Registry,
 };
