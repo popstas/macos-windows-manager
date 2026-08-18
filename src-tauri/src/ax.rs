@@ -285,6 +285,76 @@ mod imp {
         Ok(())
     }
 
+    /// Поднять разложенные окна над чужими.
+    ///
+    /// Два шага, как и в `raise()`, но оба другие. `AXRaise` идёт по всем
+    /// окнам в порядке раскладки: у плитки они не перекрываются и порядок
+    /// безразличен, у каскада — задаёт стопку, и первое окно должно лечь под
+    /// последнее, а не наоборот.
+    ///
+    /// Приложение выводится вперёд с `ActivateAllWindows` — тем самым набором,
+    /// который отвергнут в `raise()`. Там нужно ровно одно окно, и вынести
+    /// вперёд все значило бы обесценить `AXRaise`; здесь наоборот: разложены
+    /// все окна терминала, и вынести вперёд одно — значит оставить остальные
+    /// под чужими, то есть не сделать ровно того, ради чего человек и нажал.
+    ///
+    /// Приложения перебираются по одному разу: два окна одного терминала — это
+    /// одна активация, а не две, и вторая только отняла бы у первой передний
+    /// план.
+    ///
+    /// Жалоба одна на всё дело и не отменяет раскладки: окна уже стоят по
+    /// местам, и отказ подъёма — это «не видно», а не «не сделано».
+    pub fn bring_to_front(reg: &Registry, window_ids: &[u64]) -> Result<(), String> {
+        let mut failed = 0usize;
+        let mut last = String::new();
+        for window_id in window_ids {
+            let Some(el) = reg
+                .known
+                .iter()
+                .find(|(_, id)| id == window_id)
+                .map(|(el, _)| el.clone())
+            else {
+                failed += 1;
+                last = "window is gone".to_string();
+                continue;
+            };
+            let action = CFString::from_static_string("AXRaise");
+            let err = unsafe {
+                accessibility_sys::AXUIElementPerformAction(
+                    el.as_concrete_TypeRef(),
+                    action.as_concrete_TypeRef(),
+                )
+            };
+            if err != accessibility_sys::kAXErrorSuccess {
+                failed += 1;
+                last = format!("AXRaise failed: {err}");
+            }
+        }
+        let mut activated = std::collections::HashSet::new();
+        for window_id in window_ids {
+            let Some(pid) = reg.owners.get(window_id).copied() else {
+                continue;
+            };
+            if !activated.insert(pid) {
+                continue;
+            }
+            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+            else {
+                failed += 1;
+                last = "owner application is gone".to_string();
+                continue;
+            };
+            if !app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows) {
+                failed += 1;
+                last = "failed to activate application".to_string();
+            }
+        }
+        if failed > 0 {
+            return Err(format!("raise: {failed} of {} failed: {last}", window_ids.len()));
+        }
+        Ok(())
+    }
+
     /// Вывести вперёд само приложение.
     ///
     /// Нужно ровно по той же причине, что и вторая половина `raise()`, только
@@ -457,6 +527,9 @@ mod imp {
     pub fn raise(_reg: &Registry, _window_id: u64) -> Result<(), String> {
         Err("raise is available on macOS only".to_string())
     }
+    pub fn bring_to_front(_reg: &Registry, _window_ids: &[u64]) -> Result<(), String> {
+        Err("raising windows is available on macOS only".to_string())
+    }
     pub fn activate_self() -> Result<(), String> {
         Err("activating the application is available on macOS only".to_string())
     }
@@ -469,6 +542,6 @@ mod imp {
 }
 
 pub use imp::{
-    activate_self, displays, list_windows, main_display, main_work_area, place, prompt_for_trust,
-    raise, trusted, Registry,
+    activate_self, bring_to_front, displays, list_windows, main_display, main_work_area, place,
+    prompt_for_trust, raise, trusted, Registry,
 };
