@@ -891,7 +891,8 @@ fn main() {
             let status = Status(Arc::new(Mutex::new("starting…".to_string())));
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
             let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let settings =
+                MenuItem::with_id(app, "settings", "\u{2699} Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             // Неактивный пункт: он не действие, а подпись. Стоит последним, под
             // «Quit», — читают его редко, а два пункта выше нажимают, и
@@ -917,10 +918,20 @@ fn main() {
             // пункт заводится сразу неактивным, чтобы человек не нажимал в
             // пустоту. Гаснет и загорается он там же, где приходит и уходит
             // пункт «выдать разрешение».
+            // Значки — знаки шрифта, а не картинки. `IconMenuItem` потребовал бы
+            // растра на каждую тему и каждый масштаб экрана, а знак берёт цвет и
+            // размер у меню сам. Выбраны те, у которых нет цветного начертания:
+            // символ с `Emoji_Presentation` встал бы в меню цветной картинкой
+            // втрое выше строки.
             let tile =
-                MenuItem::with_id(app, "tile", "Tile windows", trusted_now, None::<&str>)?;
-            let cascade =
-                MenuItem::with_id(app, "cascade", "Cascade windows", trusted_now, None::<&str>)?;
+                MenuItem::with_id(app, "tile", "\u{25a6} Tile windows", trusted_now, None::<&str>)?;
+            let cascade = MenuItem::with_id(
+                app,
+                "cascade",
+                "\u{2750} Cascade windows",
+                trusted_now,
+                None::<&str>,
+            )?;
             // `Settings…` встаёт над `Quit`, и `GRANT_POSITION` от этого не
             // меняется: приходящий и уходящий пункт по-прежнему второй сверху.
             // Пункты раскладки встают под `GRANT_POSITION`, а список окон —
@@ -1411,6 +1422,23 @@ mod tests {
     fn the_tray_has_a_settings_item() {
         let src = tracker_source();
         assert!(src.contains("\"settings\" =>"), "пункт settings обязан быть в обработчике меню");
+    }
+
+    #[test]
+    fn the_action_items_carry_an_icon() {
+        // Значок стоит перед подписью, а не вместо неё: меню читают глазами по
+        // словам, а знак только помогает найти строку быстрее.
+        let src = tracker_source();
+        for (icon, label) in [
+            ("\\u{25a6}", "Tile windows"),
+            ("\\u{2750}", "Cascade windows"),
+            ("\\u{2699}", "Settings"),
+        ] {
+            assert!(
+                src.contains(&format!("\"{icon} {label}\"")),
+                "у пункта {label} нет значка"
+            );
+        }
     }
 
     #[test]
