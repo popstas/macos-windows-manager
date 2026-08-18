@@ -27,6 +27,15 @@ use tauri::tray::TrayIconBuilder;
 #[derive(Clone)]
 struct Status(Arc<Mutex<String>>);
 
+/// Заголовки ведомых окон — по пункту меню на окно.
+///
+/// Отдельная ячейка, а не разбор строки состояния: строка — одна фраза для
+/// человека и меняется целиком (отказ публикации переписывает её всю), а
+/// список окон обязан пережить такую подмену. Пишет её трекер, читает поток,
+/// рисующий меню, — тем же порядком, что и `Status`.
+#[derive(Clone)]
+struct Windows(Arc<Mutex<Vec<String>>>);
+
 /// Есть ли сейчас разрешение Accessibility.
 ///
 /// Отвечает на этот вопрос трекер — он спрашивает систему каждый такт, — а
@@ -53,6 +62,13 @@ impl Shared {
         self.0.lock().unwrap().clone()
     }
 }
+
+/// Нарисованный сейчас список окон: подписи и сами пункты меню.
+///
+/// Подписи хранятся рядом с пунктами, а не считываются с них обратно: сравнить
+/// с новым списком нужно раньше, чем что-то трогать в меню, а пункты об этом
+/// не спрашивают.
+type Drawn = Arc<Mutex<(Vec<String>, Vec<MenuItem<tauri::Wry>>)>>;
 
 /// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
 ///
@@ -185,7 +201,7 @@ fn write_config(path: &std::path::Path, patch: &serde_json::Value) -> Result<(),
 ///
 /// Без разрешения файл не пишется вовсе. Пустой файл означал бы «окон нет» и
 /// погасил бы чужие пометки; прежний протухнет у читателя сам, и это правда.
-fn run_tracker(status: Status, trusted: Trusted, shared: Shared) {
+fn run_tracker(status: Status, trusted: Trusted, shared: Shared, windows: Windows) {
     // Копия при старте — для того, что на лету не меняется: путей состояния и
     // потока подписки. Всё, что читается каждый оборот, берётся из ячейки
     // внутри цикла.
@@ -267,6 +283,10 @@ fn run_tracker(status: Status, trusted: Trusted, shared: Shared) {
         trusted.0.store(is_trusted, Ordering::Relaxed);
         if !is_trusted {
             *status.0.lock().unwrap() = "Accessibility not granted".to_string();
+            // Список окон уходит из меню вместе с разрешением: без него такт
+            // до окон не доходит вовсе, и оставшиеся пункты называли бы окна,
+            // про которые трекер уже ничего не знает.
+            windows.0.lock().unwrap().clear();
             // Один раз на потерю разрешения, а не каждый такт: жалоба длинная,
             // а такт секундный — в логе она вытеснила бы всё остальное за
             // минуту. Латч сбрасывается ниже, когда разрешение снова есть, так
@@ -313,6 +333,21 @@ fn run_tracker(status: Status, trusted: Trusted, shared: Shared) {
             }
         }
         let bound = tracker.bound();
+        // Подписи для меню собираются каждый такт, а не в ветке публикации:
+        // окна ведутся и тогда, когда посылка не удалась, и меню обязано
+        // показывать то, что ведёт трекер, а не то, что уехало читателю.
+        //
+        // Порядок — по подписи. `bound` разложен по идентификатору сессии, то
+        // есть по uuid: человеку это случайный порядок, вдобавок он менялся бы
+        // от такта к такту, стоит одному окну закрыться.
+        {
+            let mut labels: Vec<String> = bound
+                .values()
+                .map(|b| mwm_core::status::window_item_label(&b.title, &b.app))
+                .collect();
+            labels.sort();
+            *windows.0.lock().unwrap() = labels;
+        }
         // Сессия ↔ окно. Заголовок — единственное, что есть у обоих списков:
         // `Seen` знает номер окна, `Bound` — сессию, и оба знают, как окно
         // называется. У `Bound` заголовок уже очищен от значка состояния,
@@ -800,23 +835,39 @@ fn main() {
             let shared = Shared(Arc::new(Mutex::new(load_config())));
             app.manage(shared.clone());
 
+            let windows = Windows(Arc::new(Mutex::new(Vec::new())));
+
             let worker = status.clone();
             let worker_trusted = trusted.clone();
-            std::thread::spawn(move || run_tracker(worker, worker_trusted, shared));
+            let worker_windows = windows.clone();
+            std::thread::spawn(move || {
+                run_tracker(worker, worker_trusted, shared, worker_windows)
+            });
 
             // Строка состояния обновляется своим тиком: лезть в меню из потока
             // трекера нельзя — пункты меню живут на главном потоке.
             let painter = status.clone();
             let handle = app.handle().clone();
+            // Второй дескриптор — тому же приложению: `handle` уходит в
+            // `run_on_main_thread` каждый такт, а заводить пункты меню внутри
+            // замыкания нужно через него же.
+            let handle_for_items = handle.clone();
             let menu_for_painter = menu.clone();
             // Стоит ли пункт в меню сейчас. Меню трогается только на смене
             // ответа: без этой памяти каждые две секунды уходил бы `remove` или
             // `insert` впустую, а повторный `remove` уже убранного пункта ещё и
             // отвечает ошибкой.
             let mut grant_shown = !trusted_now;
+            // Что за пункты со списком окон стоят в меню сейчас и как они
+            // подписаны. Ячейка, а не переменная цикла: заводить и убирать
+            // пункты можно только на главном потоке, а замыкание, отправленное
+            // туда, ничего не возвращает — держать нарисованное между тактами
+            // больше негде.
+            let drawn: Drawn = Arc::new(Mutex::new((Vec::new(), Vec::new())));
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let text = painter.0.lock().unwrap().clone();
+                let labels = windows.0.lock().unwrap().clone();
                 // Разрешение выдают и отзывают на ходу, перезапуска macOS для
                 // этого не требует: `AXIsProcessTrusted` начинает отвечать
                 // иначе, трекер это видит на следующем такте — и пункт уходит
@@ -828,6 +879,8 @@ fn main() {
                     let state = state.clone();
                     let grant = grant.clone();
                     let menu = menu_for_painter.clone();
+                    let drawn = drawn.clone();
+                    let app = handle_for_items.clone();
                     move || {
                         let _ = state.set_text(&text);
                         match toggle {
@@ -835,6 +888,46 @@ fn main() {
                             Some(false) => { let _ = menu.remove(&grant); }
                             None => {}
                         }
+                        // Меню трогается только на смене списка — по той же
+                        // причине, что и пункт «выдать разрешение»: такт
+                        // рисовальщика двухсекундный, а состав окон меняется
+                        // раз в час, и перебирать пункты впустую незачем.
+                        let mut drawn = drawn.lock().unwrap();
+                        if drawn.0 == labels {
+                            return;
+                        }
+                        for item in drawn.1.drain(..) {
+                            let _ = menu.remove(&item);
+                        }
+                        // Под пунктом «выдать разрешение», когда тот стоит:
+                        // место у него постоянное (`GRANT_POSITION`), и список
+                        // обязан вставать под ним, а не поверх — иначе пункт,
+                        // который человек ищет глазами на одном месте, уезжал
+                        // бы вниз от каждого нового окна.
+                        let base = GRANT_POSITION + usize::from(want_grant);
+                        for (i, label) in labels.iter().enumerate() {
+                            // Пункты неактивные: они подписи, а не действия, —
+                            // то же, что у строки состояния и версии.
+                            //
+                            // Отступ из двух пробелов — единственный способ
+                            // показать подчинение строке состояния: вложенных
+                            // пунктов без подменю в меню трея нет, а без
+                            // отступа список читается как продолжение
+                            // действий ниже.
+                            let item = MenuItem::with_id(
+                                &app,
+                                format!("window-{i}"),
+                                format!("  {label}"),
+                                false,
+                                None::<&str>,
+                            );
+                            if let Ok(item) = item {
+                                if menu.insert(&item, base + i).is_ok() {
+                                    drawn.1.push(item);
+                                }
+                            }
+                        }
+                        drawn.0 = labels;
                     }
                 });
             });
@@ -1027,6 +1120,42 @@ mod tests {
         assert!(
             open.contains("ax::activate_self()"),
             "открытие настроек обязано выводить приложение вперёд"
+        );
+    }
+
+    #[test]
+    fn the_window_list_is_collected_every_tick_not_only_on_publish() {
+        // Окна ведутся и тогда, когда посылка не удалась. Собирай подписи в
+        // ветке публикации — и меню при отказе доставки показывало бы состав
+        // окон той минуты, когда доставка ещё удавалась.
+        let src = tracker_source();
+        let fill = src.find("window_item_label").expect("подписи собираются в такте");
+        let publish = src.find("if should_write(").expect("публикация на месте");
+        assert!(fill < publish, "список собирается до ветки публикации, а не внутри неё");
+    }
+
+    #[test]
+    fn losing_the_permission_empties_the_window_list() {
+        // Без разрешения такт до окон не доходит вовсе, и оставшиеся пункты
+        // называли бы окна, про которые трекер уже ничего не знает.
+        let src = tracker_source();
+        let branch = src.split("if !is_trusted {").nth(1).unwrap_or("");
+        let head = branch.split("continue;").next().unwrap_or("");
+        assert!(
+            head.contains("windows.0.lock().unwrap().clear()"),
+            "потеря разрешения обязана убирать список окон из меню"
+        );
+    }
+
+    #[test]
+    fn the_window_list_stands_under_the_grant_item() {
+        // Место пункта «выдать разрешение» постоянное, и список обязан
+        // вставать под ним: иначе пункт, который человек ищет глазами на одном
+        // месте, уезжал бы вниз от каждого нового окна.
+        let src = tracker_source();
+        assert!(
+            src.contains("let base = GRANT_POSITION + usize::from(want_grant);"),
+            "список окон вставляется под пунктом grant, а не поверх него"
         );
     }
 
