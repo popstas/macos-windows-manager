@@ -1908,7 +1908,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "macos-windows-manager"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "accessibility",
  "accessibility-sys",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "mwm-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "serde",
