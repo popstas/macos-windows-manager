@@ -893,12 +893,12 @@ fn main() {
             let grant = MenuItem::with_id(
                 app,
                 "grant",
-                "\u{26bf} Grant Accessibility…",
+                "\u{26bf}\u{200a}\u{200a} Grant Accessibility…",
                 true,
                 None::<&str>,
             )?;
             let settings =
-                MenuItem::with_id(app, "settings", "\u{2699} Settings", true, None::<&str>)?;
+                MenuItem::with_id(app, "settings", "\u{2699}\u{200a}\u{200a}\u{200a}\u{200a}\u{200a} Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "\u{23fb} Quit", true, None::<&str>)?;
             // Неактивный пункт: он не действие, а подпись. Стоит последним, под
             // «Quit», — читают его редко, а два пункта выше нажимают, и
@@ -929,12 +929,24 @@ fn main() {
             // размер у меню сам. Выбраны те, у которых нет цветного начертания:
             // символ с `Emoji_Presentation` встал бы в меню цветной картинкой
             // втрое выше строки.
+            //
+            // За значком стоят волосяные пробелы (`U+200A`, 0,84 pt) — ими
+            // ширина значка догоняется до самого широкого, `⏻` в 11,95 pt,
+            // чтобы подписи начинались с одного места. Числа не выдуманы: они
+            // измерены `CTLineGetTypographicBounds` в шрифте меню
+            // (`.AppleSystemUIFont` 13 pt) на самой машине. Знаки эти приезжают
+            // из разных шрифтов — `▦` из Apple SD Gothic Neo, `❐` из Zapf
+            // Dingbats, `⚙` из Menlo, `⚿` из STIX Two Math, и только `⏻` из
+            // самого шрифта меню, — оттого ширины и разошлись: в системном
+            // шрифте знаков для плитки и каскада нет вовсе.
+            //
+            // Остаток расхождения — не больше 0,4 pt, треть волосяного пробела.
             let tile =
-                MenuItem::with_id(app, "tile", "\u{25a6} Tile windows", trusted_now, None::<&str>)?;
+                MenuItem::with_id(app, "tile", "\u{25a6}\u{200a} Tile windows", trusted_now, None::<&str>)?;
             let cascade = MenuItem::with_id(
                 app,
                 "cascade",
-                "\u{2750} Cascade windows",
+                "\u{2750}\u{200a}\u{200a} Cascade windows",
                 trusted_now,
                 None::<&str>,
             )?;
@@ -1435,17 +1447,37 @@ mod tests {
         // Значок стоит перед подписью, а не вместо неё: меню читают глазами по
         // словам, а знак только помогает найти строку быстрее.
         let src = tracker_source();
-        for (icon, label) in [
-            ("\\u{25a6}", "Tile windows"),
-            ("\\u{2750}", "Cascade windows"),
-            ("\\u{2699}", "Settings"),
-            ("\\u{26bf}", "Grant Accessibility…"),
-            ("\\u{23fb}", "Quit"),
+        // Пробелы после значка — подгонка ширины под самый широкий знак; их
+        // число разное и проверяется соседним тестом.
+        let hair = "\\u{200a}";
+        for (icon, pad, label) in [
+            ("\\u{25a6}", 1, "Tile windows"),
+            ("\\u{2750}", 2, "Cascade windows"),
+            ("\\u{2699}", 5, "Settings"),
+            ("\\u{26bf}", 2, "Grant Accessibility…"),
+            ("\\u{23fb}", 0, "Quit"),
         ] {
-            assert!(
-                src.contains(&format!("\"{icon} {label}\"")),
-                "у пункта {label} нет значка"
-            );
+            let want = format!("\"{icon}{} {label}\"", hair.repeat(pad));
+            assert!(src.contains(&want), "у пункта {label} нет значка с подгонкой: {want}");
+        }
+    }
+
+    #[test]
+    fn the_icons_line_the_labels_up_to_within_half_a_point() {
+        // Ширины измерены на маке в шрифте меню (`.AppleSystemUIFont` 13 pt).
+        // Тест сторожит арифметику подгонки: смени кто-нибудь число пробелов
+        // на глаз — подписи разъедутся, а заметить это можно только на маке.
+        const HAIR: f64 = 0.84;
+        const WIDEST: f64 = 11.95; // ⏻, оно же самое широкое
+        for (name, width, pad) in [
+            ("tile", 11.24, 1),
+            ("cascade", 9.91, 2),
+            ("settings", 7.83, 5),
+            ("grant", 10.62, 2),
+            ("quit", 11.95, 0),
+        ] {
+            let off = width + HAIR * f64::from(pad) - WIDEST;
+            assert!(off.abs() <= 0.5, "{name}: подпись съезжает на {off:.2} pt");
         }
     }
 
