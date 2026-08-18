@@ -55,6 +55,32 @@ pub fn send(cfg: &Config, payload: &serde_json::Value) -> Result<(), String> {
     }
 }
 
+/// Положить тот же файл рядом с собой — туда, где его прочтёт агрегатор этой
+/// же машины.
+///
+/// Второй адрес, а не замена первому: файл нужен обеим сторонам. На машине
+/// агрегатора он рассказывает про окна ssh-сессий, здесь — про окна сессий,
+/// которые работают тут же и в удалённом дампе не значатся вовсе.
+///
+/// Подмена атомарная и по той же причине, что у ssh-дороги: читатель
+/// опрашивает раз в секунду, и половина json у него на экране — это
+/// исключение вместо списка сессий. Шелла здесь нет, поэтому и просеивать
+/// нечего: `create_dir_all` и `rename` получают путь аргументом, а не строкой
+/// команды. Имя файла всё равно идёт через `safe_name` — оно то же самое, что
+/// у файла на той стороне, и разъехаться этим двум именам нельзя: агрегатор
+/// сливает файлы по имени машины внутри, а человек ищет их глазами по имени
+/// снаружи.
+pub fn write_local(dir: &str, host: &str, payload: &serde_json::Value) -> Result<(), String> {
+    let dir = std::path::Path::new(dir);
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = safe_name(host);
+    let tmp = dir.join(format!("{name}.json.tmp"));
+    let final_path = dir.join(format!("{name}.json"));
+    let text = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &final_path).map_err(|e| format!("{}: {e}", final_path.display()))
+}
+
 /// Имя машины в имени файла: буквы, цифры, точка, дефис — и ничего больше.
 ///
 /// Строка едет в команду чужого шелла, и кавычить её было бы половиной защиты:
@@ -98,6 +124,50 @@ fn safe_dir(path: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_local_file_lands_under_the_machine_name() {
+        // Имя обязано совпасть с тем, под которым файл лежит на той стороне:
+        // агрегатор сливает файлы по имени машины внутри, а человек ищет их
+        // глазами по имени снаружи.
+        let dir = std::env::temp_dir().join("mwm-local-publish");
+        std::fs::remove_dir_all(&dir).ok();
+        let payload = serde_json::json!({"host": "mac", "windows": {}});
+        write_local(dir.to_str().unwrap(), "mac", &payload).unwrap();
+        let text = std::fs::read_to_string(dir.join("mac.json")).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), payload);
+        assert!(!dir.join("mac.json.tmp").exists(), "временный файл не остаётся");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_second_write_replaces_the_first() {
+        // Два трекера с одним именем — это одна машина, запущенная дважды, и
+        // второй обязан перетереть первого, а не завести соседний файл. То же
+        // правило, что у ssh-дороги.
+        let dir = std::env::temp_dir().join("mwm-local-publish-twice");
+        std::fs::remove_dir_all(&dir).ok();
+        write_local(dir.to_str().unwrap(), "mac", &serde_json::json!({"n": 1})).unwrap();
+        write_local(dir.to_str().unwrap(), "mac", &serde_json::json!({"n": 2})).unwrap();
+        let text = std::fs::read_to_string(dir.join("mac.json")).unwrap();
+        assert!(text.contains("\"n\":2"), "{text}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "соседних файлов нет");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unwritable_directory_names_itself() {
+        // Отказ обязан назвать путь: чинить его будут здесь, у себя, а не на
+        // машине агрегатора — тем и отличается от отказа ssh-дороги.
+        let blocked = std::env::temp_dir().join("mwm-local-blocked");
+        std::fs::remove_dir_all(&blocked).ok();
+        std::fs::write(&blocked, "не каталог").unwrap();
+        let err = write_local(blocked.join("under").to_str().unwrap(), "mac",
+                              &serde_json::json!({}))
+            .unwrap_err();
+        assert!(err.contains("mwm-local-blocked"), "{err}");
+        std::fs::remove_file(&blocked).ok();
+    }
 
     #[test]
     fn hostname_becomes_a_safe_file_name() {

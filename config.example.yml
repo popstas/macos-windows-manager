@@ -40,7 +40,8 @@ terminals:
 # hand works the same way, and takes effect on the next tick — the tracker
 # rereads them as it goes.
 #
-# All three concern terminal windows only, the ones listed in `terminals` above.
+# The first three concern terminal windows only, the ones listed in `terminals`
+# above.
 # features:
 #   # Put an appearing window back where its session had it last time.
 #   # Switched off, remembered places keep being recorded, so switching it back
@@ -53,6 +54,16 @@ terminals:
 #   # file — a picker that offers Enter and does nothing is worse than a
 #   # terminal opened by hand.
 #   requests: true
+#   # Also use the aggregator on this machine: read its session list alongside
+#   # the remote one, and write the window file into ~/.ccfzf/windows here as
+#   # well as on `sshHost`.
+#   #
+#   # Without it a session running on this very machine gets no window in the
+#   # picker: its name is not in the remote list, so the window title has
+#   # nothing to match against, and the window file lands only where that
+#   # session is unknown. Costs nothing on a machine with no aggregator of its
+#   # own — the local list is simply absent.
+#   localSource: true
 
 # Broker through which requests to raise a window and to mark a session unread
 # arrive. Without this block the tracker works as before — it lists windows and

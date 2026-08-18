@@ -46,6 +46,28 @@ pub fn parse_index(json: &str) -> BTreeMap<String, SessionRef> {
     out.into_iter().map(|(k, (r, _))| (k, r)).collect()
 }
 
+/// Слить индекс удалённого дампа с индексом местного.
+///
+/// Тёзки между машинами законны: одно и то же имя сессии бывает и здесь, и
+/// там, — и побеждает удалённая. Правило «побеждает более живая», которым
+/// внутри одного дампа разводят тёзок, тут не годится: `activityAt` приезжает
+/// из файлов хука, а на машине без хуков он нулевой у всех, то есть исход
+/// решался бы не свежестью, а тем, стоят ли хуки. Вторая причина сильнее
+/// первой: так трекер вёл себя до появления второго источника, и окно
+/// ssh-сессии, чьё имя совпало с местной, привязывается ровно как раньше.
+///
+/// Цена названа: местная сессия-тёзка окна не получит. Случай редкий, а
+/// ошибка в другую сторону — окно ssh-сессии, отданное местной, — стоила бы
+/// пикеру неверного ▣ и Enter, поднимающего не ту машину.
+pub fn merge_index(
+    remote: BTreeMap<String, SessionRef>,
+    local: BTreeMap<String, SessionRef>,
+) -> BTreeMap<String, SessionRef> {
+    let mut out = local;
+    out.extend(remote);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +170,43 @@ mod tests {
             r#"{{"sessions":[{{"id":"{A}","title":"ccfzf","cwd":"~/projects/js/ccfzf-picker"}}]}}"#
         ));
         assert_eq!(idx.get("ccfzf"), Some(&r(A, "~/projects/js/ccfzf-picker")));
+    }
+
+    #[test]
+    fn the_two_indexes_fill_each_other_in() {
+        // Половинки складываются: местная сессия доезжает до привязки, не
+        // отбирая ничего у удалённых.
+        let remote = parse_index(&format!(r#"{{"sessions":[{{"id":"{A}","title":"remote one"}}]}}"#));
+        let local = parse_index(&format!(r#"{{"sessions":[{{"id":"{B}","title":"local one"}}]}}"#));
+        let idx = merge_index(remote, local);
+        assert_eq!(idx.get("remote one"), Some(&r(A, "")));
+        assert_eq!(idx.get("local one"), Some(&r(B, "")));
+        assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn on_a_name_clash_the_remote_session_wins() {
+        // Так трекер вёл себя до второго источника, и окно ssh-сессии обязано
+        // привязываться как раньше. Свежесть тут не судья: `activityAt` на
+        // машине без хуков нулевой у всех, и «более живая» решала бы исход
+        // наличием хуков, а не свежестью.
+        let remote = parse_index(&format!(
+            r#"{{"sessions":[{{"id":"{A}","title":"ccfzf","activityAt":1}}]}}"#
+        ));
+        let local = parse_index(&format!(
+            r#"{{"sessions":[{{"id":"{B}","title":"ccfzf","activityAt":99}}]}}"#
+        ));
+        assert_eq!(merge_index(remote, local).get("ccfzf"), Some(&r(A, "")));
+    }
+
+    #[test]
+    fn an_empty_half_costs_nothing() {
+        // Обе стороны бывают пустыми по-честному: местного агрегатора нет
+        // вовсе, удалённый не дочитался. Слияние обязано отдать вторую целой.
+        let remote = parse_index(&format!(r#"{{"sessions":[{{"id":"{A}","title":"only"}}]}}"#));
+        assert_eq!(merge_index(remote.clone(), BTreeMap::new()), remote);
+        assert_eq!(merge_index(BTreeMap::new(), remote.clone()), remote);
+        assert!(merge_index(BTreeMap::new(), BTreeMap::new()).is_empty());
     }
 
     #[test]
