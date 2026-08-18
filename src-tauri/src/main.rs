@@ -36,6 +36,24 @@ struct Status(Arc<Mutex<String>>);
 #[derive(Clone)]
 struct Windows(Arc<Mutex<Vec<String>>>);
 
+/// Рабочая область главного экрана, как её видит главный поток.
+///
+/// Отдельная ячейка ровно затем, что спросить её может только главный поток
+/// (`NSScreen` — API AppKit), а нужна она тому, который двигает окна. Обновляет
+/// её рисовальщик меню — он и так заходит на главный поток каждые две секунды,
+/// а Dock переезжает реже.
+#[derive(Clone)]
+struct Work(Arc<Mutex<Option<mwm_core::geometry::Bounds>>>);
+
+/// Куда пункт меню кладёт просьбу.
+///
+/// Двигать окна из главного потока нельзя: реестр `AXUIElement` не `Send` и
+/// живёт в потоке трекера. Поэтому клик по пункту не расставляет ничего сам, а
+/// кладёт в тот же канал ту же просьбу, что приезжает по MQTT, — и оба входа
+/// сходятся в одной ветке исполнения.
+#[derive(Clone)]
+struct Asking(Arc<Mutex<std::sync::mpsc::Sender<mwm_core::request::Request>>>);
+
 /// Есть ли сейчас разрешение Accessibility.
 ///
 /// Отвечает на этот вопрос трекер — он спрашивает систему каждый такт, — а
@@ -69,6 +87,13 @@ impl Shared {
 /// с новым списком нужно раньше, чем что-то трогать в меню, а пункты об этом
 /// не спрашивают.
 type Drawn = Arc<Mutex<(Vec<String>, Vec<MenuItem<tauri::Wry>>)>>;
+
+/// Сколько пунктов раскладки стоит под `GRANT_POSITION`.
+///
+/// Список окон вставляется по номеру, и номер этот считается от места, где
+/// кончились пункты с постоянным местом. Забудь про них счёт — список встал бы
+/// поверх кнопок.
+const LAYOUT_ITEMS: usize = 2;
 
 /// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
 ///
@@ -201,7 +226,15 @@ fn write_config(path: &std::path::Path, patch: &serde_json::Value) -> Result<(),
 ///
 /// Без разрешения файл не пишется вовсе. Пустой файл означал бы «окон нет» и
 /// погасил бы чужие пометки; прежний протухнет у читателя сам, и это правда.
-fn run_tracker(status: Status, trusted: Trusted, shared: Shared, windows: Windows) {
+fn run_tracker(
+    status: Status,
+    trusted: Trusted,
+    shared: Shared,
+    windows: Windows,
+    requests: std::sync::mpsc::Receiver<mwm_core::request::Request>,
+    to_requests: std::sync::mpsc::Sender<mwm_core::request::Request>,
+    work: Work,
+) {
     // Копия при старте — для того, что на лету не меняется: путей состояния и
     // потока подписки. Всё, что читается каждый оборот, берётся из ячейки
     // внутри цикла.
@@ -221,7 +254,7 @@ fn run_tracker(status: Status, trusted: Trusted, shared: Shared, windows: Window
     // Сказали ли уже про отсутствующее разрешение. Живёт до конца жизни
     // процесса и сбрасывается, когда разрешение появилось.
     let mut told_untrusted = false;
-    let link = mqtt::spawn(&cfg.mqtt);
+    let link = mqtt::spawn(&cfg.mqtt, to_requests);
     // Номер окна каждой сессии на прошлом такте: подъёму нужно окно, а `bound`
     // рассказывает про сессии. Держим рядом, потому что `Registry` знает
     // номера, а не сессии, и связать их может только тот, кто видел оба списка.
@@ -247,13 +280,13 @@ fn run_tracker(status: Status, trusted: Trusted, shared: Shared, windows: Window
         // такту. Отсоединение канала (поток подписки умер) — тот же сон:
         // `recv_timeout` на закрытом канале возвращается мгновенно, и без
         // этой ветки такт превратился бы в горячий цикл.
-        match link.requests.recv_timeout(Duration::from_millis(cfg.tick_ms)) {
+        match requests.recv_timeout(Duration::from_millis(cfg.tick_ms)) {
             Ok(req) => {
                 let mut pending = vec![req];
                 // Разгребается вся очередь, а не одна просьба: иначе каждая
                 // стоила бы полного такта с перечислением окон и, возможно,
                 // походом за дампом по ssh.
-                while let Ok(next) = link.requests.try_recv() {
+                while let Ok(next) = requests.try_recv() {
                     pending.push(next);
                 }
                 for req in pending {
@@ -263,7 +296,7 @@ fn run_tracker(status: Status, trusted: Trusted, shared: Shared, windows: Window
                     if !features.requests {
                         continue;
                     }
-                    let note = serve(&req, &mut tracker, &registry, &window_of);
+                    let note = serve(&req, &mut tracker, &registry, &window_of, &work);
                     if let Some(note) = note {
                         eprintln!("mwm: {note}");
                         *status.0.lock().unwrap() = note;
@@ -635,6 +668,7 @@ fn serve(
     tracker: &mut Tracker,
     registry: &ax::Registry,
     window_of: &std::collections::HashMap<String, u64>,
+    work: &Work,
 ) -> Option<String> {
     use mwm_core::request::Request;
     match req {
@@ -651,7 +685,76 @@ fn serve(
             tracker.mark_unread(id);
             None
         }
+        Request::Arrange { mode, ids } => {
+            arrange(*mode, ids, tracker, registry, window_of, work)
+        }
     }
+}
+
+/// Разложить окна по главному экрану.
+///
+/// Порядок: тот, что приехал в просьбе, а иначе — тот, которым подписаны
+/// пункты меню. «В порядке сортировки списка» иначе не сделать: порядок знает
+/// только тот, кто список показывает, и своего у этой стороны нет.
+fn arrange(
+    mode: mwm_core::layout::Layout,
+    ids: &[String],
+    tracker: &Tracker,
+    registry: &ax::Registry,
+    window_of: &std::collections::HashMap<String, u64>,
+    work: &Work,
+) -> Option<String> {
+    // Настоящая рабочая область приезжает с главного потока и знает про Dock с
+    // любой стороны. Запасная — экран без полосы меню — считается здесь только
+    // до первого захода рисовальщика: Dock в ней не вычтен, и окна слева уйдут
+    // под него, но это одна раскладка в первые две секунды после запуска,
+    // а отказ был бы виден всегда.
+    let known = *work.0.lock().unwrap();
+    let area = match known {
+        Some(area) => area,
+        None => match ax::main_display() {
+            Some(screen) => mwm_core::layout::work_area(screen.bounds),
+            None => return Some("place: no main display".to_string()),
+        },
+    };
+    let order: Vec<u64> = if ids.is_empty() {
+        // Та же подпись и та же сортировка, что рисуют меню, — потому порядок
+        // раскладки и порядок пунктов совпадают по построению, а не по
+        // договорённости, которую первая же правка нарушит.
+        let mut named: Vec<(String, u64)> = tracker
+            .bound()
+            .values()
+            .filter_map(|b| {
+                let window_id = window_of.get(&b.session_id)?;
+                Some((mwm_core::status::window_item_label(&b.title, &b.app), *window_id))
+            })
+            .collect();
+        named.sort();
+        named.into_iter().map(|(_, window_id)| window_id).collect()
+    } else {
+        // Сессия без окна пропускается молча: список приехал с той стороны, и
+        // окно могли закрыть между опросом и нажатием. Отказать всей раскладке
+        // из-за одной закрытой сессии — значит не разложить ничего.
+        ids.iter().filter_map(|id| window_of.get(id).copied()).collect()
+    };
+    if order.is_empty() {
+        return Some("place: no windows to place".to_string());
+    }
+    let mut failed = 0usize;
+    let mut last = String::new();
+    for (window_id, want) in order
+        .iter()
+        .zip(mwm_core::layout::arrange(mode, area, order.len()))
+    {
+        if let Err(e) = ax::place(registry, *window_id, want) {
+            eprintln!("mwm: place failed: {e}");
+            failed += 1;
+            last = e;
+        }
+    }
+    // Жалоба называет число: одно неподатливое окно из шести — не то же самое,
+    // что раскладка, не сработавшая вовсе.
+    (failed > 0).then(|| format!("place: {failed} of {} windows failed: {last}", order.len()))
 }
 
 /// Настройки, как их покажет окно.
@@ -739,6 +842,23 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Попросить о раскладке из меню трея.
+///
+/// Отказ виден только в логе: пункт меню ответить человеку нечем, а раскладка
+/// либо случится через такт, либо не случится вовсе — и тогда о причине скажет
+/// строка состояния, куда трекер положит свою жалобу.
+fn ask(app: &tauri::AppHandle, mode: mwm_core::layout::Layout) {
+    use tauri::Manager;
+    // Пустой список сессий: порядок собирает трекер — он же и знает, каким
+    // порядком подписаны пункты меню.
+    let req = mwm_core::request::Request::Arrange { mode, ids: Vec::new() };
+    let asking = app.state::<Asking>();
+    let sent = asking.0.lock().map_err(|e| e.to_string()).and_then(|tx| tx.send(req).map_err(|e| e.to_string()));
+    if let Err(e) = sent {
+        eprintln!("mwm: cannot ask for a layout: {e}");
+    }
+}
+
 /// Время сборки этого бинаря, если оно в него вшито.
 ///
 /// `None` у релизной сборки: её называет версия, а штамп там лишний. Ноль в
@@ -770,9 +890,16 @@ fn main() {
 
             let status = Status(Arc::new(Mutex::new("starting…".to_string())));
             let state = MenuItem::with_id(app, "status", "starting…", false, None::<&str>)?;
-            let grant = MenuItem::with_id(app, "grant", "Grant Accessibility…", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let grant = MenuItem::with_id(
+                app,
+                "grant",
+                "\u{26bf} Grant Accessibility…",
+                true,
+                None::<&str>,
+            )?;
+            let settings =
+                MenuItem::with_id(app, "settings", "\u{2699} Settings", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "\u{23fb} Quit", true, None::<&str>)?;
             // Неактивный пункт: он не действие, а подпись. Стоит последним, под
             // «Quit», — читают его редко, а два пункта выше нажимают, и
             // сдвигать их ради подписи нельзя.
@@ -793,12 +920,33 @@ fn main() {
             // пропадал через такт рисовальщика.
             let trusted_now = ax::trusted();
             let trusted = Trusted(Arc::new(AtomicBool::new(trusted_now)));
+            // Раскладка без разрешения не сработает — двигать окна нечем, — и
+            // пункт заводится сразу неактивным, чтобы человек не нажимал в
+            // пустоту. Гаснет и загорается он там же, где приходит и уходит
+            // пункт «выдать разрешение».
+            // Значки — знаки шрифта, а не картинки. `IconMenuItem` потребовал бы
+            // растра на каждую тему и каждый масштаб экрана, а знак берёт цвет и
+            // размер у меню сам. Выбраны те, у которых нет цветного начертания:
+            // символ с `Emoji_Presentation` встал бы в меню цветной картинкой
+            // втрое выше строки.
+            let tile =
+                MenuItem::with_id(app, "tile", "\u{25a6} Tile windows", trusted_now, None::<&str>)?;
+            let cascade = MenuItem::with_id(
+                app,
+                "cascade",
+                "\u{2750} Cascade windows",
+                trusted_now,
+                None::<&str>,
+            )?;
             // `Settings…` встаёт над `Quit`, и `GRANT_POSITION` от этого не
             // меняется: приходящий и уходящий пункт по-прежнему второй сверху.
+            // Пункты раскладки встают под `GRANT_POSITION`, а список окон —
+            // под ними: у кнопки место постоянное, а список растёт и тает от
+            // числа окон, и кнопка уезжала бы у человека из-под курсора.
             let menu = if trusted_now {
-                Menu::with_items(app, &[&state, &settings, &quit, &version])?
+                Menu::with_items(app, &[&state, &tile, &cascade, &settings, &quit, &version])?
             } else {
-                Menu::with_items(app, &[&state, &grant, &settings, &quit, &version])?
+                Menu::with_items(app, &[&state, &grant, &tile, &cascade, &settings, &quit, &version])?
             };
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
@@ -824,6 +972,8 @@ fn main() {
                             }
                         });
                     }
+                    "tile" => ask(app, mwm_core::layout::Layout::Tile),
+                    "cascade" => ask(app, mwm_core::layout::Layout::Cascade),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -837,11 +987,38 @@ fn main() {
 
             let windows = Windows(Arc::new(Mutex::new(Vec::new())));
 
+            // Канал просьб заводится здесь, а не в подписке: тот же конец нужен
+            // пунктам меню, а они живут на главном потоке. Отсюда же и то, что
+            // канал не закроется, останься подписка ненастроенной, — конец
+            // лежит в `Asking` до конца жизни приложения, и `recv_timeout` у
+            // трекера не начнёт возвращать `Disconnected` в горячем цикле.
+            //
+            // `Mutex` не ради гонки за отправку — `Sender` и так `Send`, — а
+            // ради `Sync`: обработчик меню обязан быть им, а `Sender` сам по
+            // себе не `Sync`.
+            let (to_requests, requests) = std::sync::mpsc::channel();
+            let asking = Asking(Arc::new(Mutex::new(to_requests.clone())));
+            app.manage(asking);
+
+            // Рабочая область: пустая до первого захода рисовальщика на главный
+            // поток. Пустоту трекер переживает — считает по запасной, — а вот
+            // спросить `NSScreen` из своего потока не может вовсе.
+            let work = Work(Arc::new(Mutex::new(None)));
+
             let worker = status.clone();
             let worker_trusted = trusted.clone();
             let worker_windows = windows.clone();
+            let worker_work = work.clone();
             std::thread::spawn(move || {
-                run_tracker(worker, worker_trusted, shared, worker_windows)
+                run_tracker(
+                    worker,
+                    worker_trusted,
+                    shared,
+                    worker_windows,
+                    requests,
+                    to_requests,
+                    worker_work,
+                )
             });
 
             // Строка состояния обновляется своим тиком: лезть в меню из потока
@@ -881,11 +1058,32 @@ fn main() {
                     let menu = menu_for_painter.clone();
                     let drawn = drawn.clone();
                     let app = handle_for_items.clone();
+                    let tile = tile.clone();
+                    let cascade = cascade.clone();
+                    let work = work.clone();
                     move || {
+                        // Первым делом, до всякой работы с меню: раскладка без
+                        // рабочей области считает по запасной, где Dock не
+                        // вычтен, и лишний такт такого счёта — это окна под
+                        // Dock у того, кто нажал сразу после запуска.
+                        *work.0.lock().unwrap() = ax::main_work_area();
                         let _ = state.set_text(&text);
                         match toggle {
-                            Some(true) => { let _ = menu.insert(&grant, GRANT_POSITION); }
-                            Some(false) => { let _ = menu.remove(&grant); }
+                            // Пункт «выдать разрешение» приходит ровно тогда,
+                            // когда раскладка перестаёт работать: двигать окна
+                            // без Accessibility нечем. Одна ветка на оба
+                            // события — разойдись они, пункт остался бы
+                            // нажимаемым и молчащим.
+                            Some(true) => {
+                                let _ = menu.insert(&grant, GRANT_POSITION);
+                                let _ = tile.set_enabled(false);
+                                let _ = cascade.set_enabled(false);
+                            }
+                            Some(false) => {
+                                let _ = menu.remove(&grant);
+                                let _ = tile.set_enabled(true);
+                                let _ = cascade.set_enabled(true);
+                            }
                             None => {}
                         }
                         // Меню трогается только на смене списка — по той же
@@ -904,7 +1102,7 @@ fn main() {
                         // обязан вставать под ним, а не поверх — иначе пункт,
                         // который человек ищет глазами на одном месте, уезжал
                         // бы вниз от каждого нового окна.
-                        let base = GRANT_POSITION + usize::from(want_grant);
+                        let base = GRANT_POSITION + usize::from(want_grant) + LAYOUT_ITEMS;
                         for (i, label) in labels.iter().enumerate() {
                             // Пункты неактивные: они подписи, а не действия, —
                             // то же, что у строки состояния и версии.
@@ -1154,8 +1352,75 @@ mod tests {
         // месте, уезжал бы вниз от каждого нового окна.
         let src = tracker_source();
         assert!(
-            src.contains("let base = GRANT_POSITION + usize::from(want_grant);"),
+            src.contains("let base = GRANT_POSITION + usize::from(want_grant)"),
             "список окон вставляется под пунктом grant, а не поверх него"
+        );
+    }
+
+    #[test]
+    fn both_ways_to_ask_for_a_layout_end_in_one_branch() {
+        // Соль связки: пункт трея ничего не двигает сам — реестр окон не `Send`
+        // и живёт в потоке трекера. Он кладёт в канал ту же просьбу, что
+        // приезжает по MQTT. Разойдись эти дороги — раскладок стало бы две, и
+        // чинить пришлось бы обе.
+        let src = tracker_source();
+        assert!(
+            src.contains("fn ask(app: &tauri::AppHandle, mode: mwm_core::layout::Layout)"),
+            "пункт меню просит, а не расставляет"
+        );
+        assert!(
+            src.contains("mwm_core::request::Request::Arrange { mode, ids: Vec::new() }"),
+            "просьба из меню — та же, что приезжает по MQTT"
+        );
+        assert_eq!(
+            src.matches("Request::Arrange { mode, ids } =>").count(),
+            1,
+            "исполняет раскладку одна ветка"
+        );
+    }
+
+    #[test]
+    fn the_window_list_stands_under_the_layout_items() {
+        // У кнопки место постоянное, а список растёт и тает от числа окон.
+        // Забудь счёт пунктов раскладки — список встал бы поверх кнопки, и та
+        // уезжала бы у человека из-под курсора от каждого нового окна.
+        let src = tracker_source();
+        assert!(
+            src.contains("let base = GRANT_POSITION + usize::from(want_grant) + LAYOUT_ITEMS;"),
+            "список окон вставляется под пунктами раскладки"
+        );
+        assert_eq!(
+            src.matches("&tile, &cascade,").count(),
+            2,
+            "оба пункта стоят в обеих сборках меню — с разрешением и без"
+        );
+        assert_eq!(
+            super::LAYOUT_ITEMS, 2,
+            "счёт пунктов раскладки совпадает с их числом в меню"
+        );
+    }
+
+    #[test]
+    fn losing_the_permission_greys_out_the_layout_item() {
+        // Без Accessibility двигать окна нечем, и нажатие ушло бы в пустоту:
+        // жалоба легла бы в строку состояния, а человек ждал бы окон.
+        let src = tracker_source();
+        let branch = src.split("Some(true) => {").nth(1).unwrap_or("");
+        let head = branch.split("Some(false)").next().unwrap_or("");
+        assert!(
+            head.contains("tile.set_enabled(false)") && head.contains("cascade.set_enabled(false)"),
+            "оба пункта гаснут там же, где приходит пункт «выдать разрешение»"
+        );
+    }
+
+    #[test]
+    fn a_layout_without_windows_complains_instead_of_placing() {
+        // Пустой порядок — не «разложил нечего», а «сессии есть, окон нет»:
+        // молчание здесь неотличимо от сработавшей раскладки.
+        let src = tracker_source();
+        assert!(
+            src.contains("return Some(\"place: no windows to place\".to_string());"),
+            "пустой список окон отвечает жалобой"
         );
     }
 
@@ -1163,6 +1428,25 @@ mod tests {
     fn the_tray_has_a_settings_item() {
         let src = tracker_source();
         assert!(src.contains("\"settings\" =>"), "пункт settings обязан быть в обработчике меню");
+    }
+
+    #[test]
+    fn the_action_items_carry_an_icon() {
+        // Значок стоит перед подписью, а не вместо неё: меню читают глазами по
+        // словам, а знак только помогает найти строку быстрее.
+        let src = tracker_source();
+        for (icon, label) in [
+            ("\\u{25a6}", "Tile windows"),
+            ("\\u{2750}", "Cascade windows"),
+            ("\\u{2699}", "Settings"),
+            ("\\u{26bf}", "Grant Accessibility…"),
+            ("\\u{23fb}", "Quit"),
+        ] {
+            assert!(
+                src.contains(&format!("\"{icon} {label}\"")),
+                "у пункта {label} нет значка"
+            );
+        }
     }
 
     #[test]

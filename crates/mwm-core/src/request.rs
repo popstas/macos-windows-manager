@@ -11,7 +11,12 @@ pub enum Request {
     Focus(String),
     /// Вернуть сессию в непрочитанное.
     Unread(String),
+    /// Разложить окна. Порядок сессий — тот, в котором их видит просящий;
+    /// пустой список значит «все ведомые окна, порядком этой машины».
+    Arrange { mode: Layout, ids: Vec<String> },
 }
+
+use crate::layout::Layout;
 
 /// Имя команды — хвост топика после базы.
 pub fn command_from_topic<'a>(topic: &'a str, base: &str) -> Option<&'a str> {
@@ -23,13 +28,49 @@ pub fn command_from_topic<'a>(topic: &'a str, base: &str) -> Option<&'a str> {
 }
 
 /// Просьба из имени команды и тела.
+///
+/// Тело разбирается после того, как узнана команда, а не до: у просьбы о
+/// раскладке в теле не сессия, а раскладка со списком, и общий разбор `id`
+/// отказал бы ей раньше, чем до неё дошла очередь.
 pub fn parse_request(command: &str, payload: &str) -> Option<Request> {
-    let id = id_from_payload(payload)?;
     match command {
-        "claude-focus" => Some(Request::Focus(id)),
-        "claude-session-unread" => Some(Request::Unread(id)),
+        "claude-focus" => Some(Request::Focus(id_from_payload(payload)?)),
+        "claude-session-unread" => Some(Request::Unread(id_from_payload(payload)?)),
+        "claude-place" => parse_arrange(payload),
         _ => None,
     }
+}
+
+/// Просьба о раскладке: `{"mode": …, "ids": [...]}`, json-строка и сырая
+/// строка — теми же тремя видами, что и просьба о сессии, и по той же причине.
+///
+/// Список сессий необязателен: панель шлёт одно имя раскладки, а порядок у неё
+/// взяться неоткуда. Пустой список не отказ, а «разложи всё, что ведёшь».
+fn parse_arrange(payload: &str) -> Option<Request> {
+    let text = payload.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (name, ids) = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(map)) => {
+            let name = map.get("mode")?.as_str()?.to_string();
+            let ids = map
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (name, ids)
+        }
+        Ok(serde_json::Value::String(s)) => (s, Vec::new()),
+        _ => (text.to_string(), Vec::new()),
+    };
+    Some(Request::Arrange { mode: Layout::from_name(&name)?, ids })
 }
 
 /// Id сессии из тела: из объекта `{"id": …}`, из json-строки и из сырой строки.
@@ -98,6 +139,52 @@ mod tests {
         // разборе одного и того же топика — это отладка на двух машинах сразу.
         assert_eq!(parse_request("claude-focus", SID), Some(Request::Focus(SID.to_string())));
         assert_eq!(parse_request("claude-focus", &format!("\"{SID}\"")), Some(Request::Focus(SID.to_string())));
+    }
+
+    #[test]
+    fn a_layout_request_carries_its_order() {
+        // Соль списка: «в порядке сортировки списка» на этой стороне не
+        // восстановить — порядок знает только тот, кто список показывает.
+        let body = format!("{{\"mode\":\"tile\",\"ids\":[\"{SID}\",\"b\"]}}");
+        assert_eq!(
+            parse_request("claude-place", &body),
+            Some(Request::Arrange {
+                mode: Layout::Tile,
+                ids: vec![SID.to_string(), "b".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn a_layout_request_without_a_list_is_still_a_request() {
+        // С панели прилетает одно имя раскладки: порядка у неё нет вовсе.
+        // Пустой список — не отказ, а «разложи всё, что ведёшь».
+        let empty = Some(Request::Arrange { mode: Layout::Tile, ids: Vec::new() });
+        assert_eq!(parse_request("claude-place", "{\"mode\":\"tile\"}"), empty);
+        assert_eq!(parse_request("claude-place", "tile"), empty);
+        assert_eq!(parse_request("claude-place", "\"tile\""), empty);
+    }
+
+    #[test]
+    fn a_list_of_things_that_are_not_ids_is_dropped_quietly() {
+        // Список приезжает из чужого json. Числа и пустые строки в нём — не
+        // повод отказать в раскладке целиком: сессий столько же, сколько
+        // разобралось, а окна человек просил разложить сейчас.
+        let body = format!("{{\"mode\":\"tile\",\"ids\":[\"{SID}\",17,\"  \"]}}");
+        assert_eq!(
+            parse_request("claude-place", &body),
+            Some(Request::Arrange { mode: Layout::Tile, ids: vec![SID.to_string()] })
+        );
+    }
+
+    #[test]
+    fn a_layout_nobody_knows_is_nothing() {
+        // Имя раскладки приезжает строкой, и разойтись с пикером в наборе имён
+        // легко. Молчаливый отказ лучше расстановки наугад: окна человека
+        // уехали бы туда, куда он не просил.
+        assert_eq!(parse_request("claude-place", "{\"mode\":\"mosaic\"}"), None);
+        assert_eq!(parse_request("claude-place", "{}"), None);
+        assert_eq!(parse_request("claude-place", ""), None);
     }
 
     #[test]
