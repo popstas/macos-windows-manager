@@ -54,13 +54,6 @@ const MAX_COLS: i32 = 120;
 /// Dock прячется, переезжает и меняет толщину.
 const MENUBAR_PT: i32 = 25;
 
-/// Поле снизу у плитки.
-///
-/// Экран целиком плитка не занимает намеренно: окно, прижатое к нижнему краю,
-/// упирается в Dock, а его край — это ещё и то место, куда человек ведёт мышь,
-/// чтобы Dock показать.
-const TILE_MARGIN_PT: i32 = 100;
-
 /// Наименьшая ширина окна: 80 колонок плюс рамка.
 fn min_width() -> i32 {
     (f64::from(MIN_COLS) * COL_PT) as i32 + CHROME_PT
@@ -139,57 +132,66 @@ fn cascade(work: Bounds, n: usize) -> Vec<Bounds> {
         .collect()
 }
 
-/// Сетка без перекрытий.
+/// Сетка без перекрытий, занимающая рабочую область целиком.
 ///
-/// Колонок — три, если три дают терминал в пределах 80–120 колонок; шире экран
-/// — колонок больше, уже — меньше. Рядов ровно столько, сколько нужно, чтобы
-/// разместить все окна: при числе окон больше числа колонок высота делится.
+/// Колонки задаёт экран, а не число окон: три, если три дают терминал в
+/// пределах 80–120 колонок; шире экран — колонок больше, уже — меньше. Окна
+/// раскладываются по колонкам сверху вниз и делят высоту своей колонки поровну,
+/// поэтому пустых клеток не остаётся: на двухколоночном экране три окна встают
+/// как одно во всю высоту слева и два по половине справа.
+///
+/// Лишние окна достаются правым колонкам, а не левым. Первое окно списка —
+/// самое верхнее в пикере, и ему достаётся колонка целиком: разложи мы остаток
+/// слева, полную высоту получало бы последнее, до которого человеку дела
+/// меньше всего.
 fn tile(work: Bounds, n: usize) -> Vec<Bounds> {
-    let cols = columns(work.width, n);
-    let rows = div_ceil(n as i32, cols);
+    let cols = columns(work.width);
     // Ширина режется по 120 колонкам даже там, где экран позволяет больше:
     // растянутый на полтора метра терминал читать нечем — глаз не доносит
-    // строку до конца.
+    // строку до конца. Колонок при этом ровно столько, чтобы до обрезки не
+    // дошло, — она сторож, а не расчёт.
     let w = (work.width / cols).min(max_width());
-    // Поле снизу отрезается до деления на ряды: иначе при двух рядах оно
-    // досталось бы только нижнему, и ряды вышли бы разной высоты.
-    let usable = if work.height > TILE_MARGIN_PT * 2 {
-        work.height - TILE_MARGIN_PT
-    } else {
-        work.height
-    };
-    let h = usable / rows;
+    let base = n as i32 / cols;
+    let rem = n as i32 % cols;
     let mut out = Vec::with_capacity(n);
-    for i in 0..n as i32 {
-        let (row, col) = (i / cols, i % cols);
-        // Ряд центрируется, а не прижимается к левому краю. Ширина обрезана по
-        // `max_width`, и неполный ряд — обычное дело: два окна на широком
-        // экране жались бы в угол, оставив полтора метра пустоты справа.
-        let in_row = (n as i32 - row * cols).min(cols);
-        let x0 = work.x + (work.width - in_row * w) / 2;
-        out.push(Bounds {
-            x: x0 + col * w,
-            y: work.y + row * h,
-            width: w,
-            height: h,
-        });
+    for col in 0..cols {
+        // Окон меньше, чем колонок, — занимаются левые, по одному. Иначе
+        // единственное окно уехало бы в правый угол.
+        let in_col = if base == 0 {
+            i32::from(col < rem)
+        } else {
+            base + i32::from(col >= cols - rem)
+        };
+        if in_col == 0 {
+            continue;
+        }
+        let h = work.height / in_col;
+        for row in 0..in_col {
+            let y = work.y + row * h;
+            // Нижнему окну колонки достаётся остаток от деления: без этого
+            // между ним и краем оставалась бы щель в пару точек, и «занимает
+            // весь экран» переставало быть правдой.
+            let height = if row == in_col - 1 { work.y + work.height - y } else { h };
+            out.push(Bounds { x: work.x + col * w, y, width: w, height });
+        }
     }
     out
 }
 
-/// Сколько колонок в сетке.
+/// Сколько колонок в сетке. Зависит от экрана и только от него.
 ///
 /// Три — идеал, и от него отступают только под нажимом экрана. Когда экран
 /// узок настолько, что оба ограничения разом не выполнить (одна колонка уже
 /// шире 120 знаков, а две — уже 80), побеждает нижнее: читать узкий терминал
 /// хуже, чем широкий.
-fn columns(width: i32, n: usize) -> i32 {
+///
+/// Числом окон сетка не сжимается: единственное окно на двухколоночном экране
+/// занимает половину ширины, а не весь экран. Растянутое на весь, оно было бы
+/// вдвое шире тех 120 знаков, ради которых колонки и считаются.
+fn columns(width: i32) -> i32 {
     let most = (width / min_width()).max(1);
     let least = div_ceil(width, max_width()).max(1);
-    let cols = 3.max(least).min(most).max(1);
-    // Окон меньше, чем колонок, — сетку незачем растягивать впустую: пустая
-    // клетка в ряду сдвинула бы центровку и оставила дыру посреди экрана.
-    cols.min(n as i32).max(1)
+    3.max(least).min(most).max(1)
 }
 
 /// Деление с округлением вверх. `div_ceil` у целых стабилизирован в 1.73, а
@@ -263,22 +265,55 @@ mod tests {
     }
 
     #[test]
-    fn a_row_keeps_a_margin_at_the_bottom() {
-        // Окно, прижатое к нижнему краю, упирается в Dock, а край экрана — это
-        // ещё и то место, куда ведут мышь, чтобы Dock показать.
-        let got = arrange(Layout::Tile, WIDE, 3);
-        assert_eq!(got[0].height, WIDE.height - TILE_MARGIN_PT);
+    fn three_windows_on_two_columns_leave_no_empty_cell() {
+        // Тот самый случай с ноутбука: первое окно занимает левую колонку
+        // целиком, второе и третье делят правую. Сетка «два на два» оставила бы
+        // внизу справа дыру в четверть экрана.
+        let got = arrange(Layout::Tile, LAPTOP, 3);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].height, LAPTOP.height, "первому — колонка целиком");
+        assert_eq!(got[0].width, LAPTOP.width / 2, "и ровно половина ширины");
+        assert_eq!(got[1].x, got[2].x, "второе и третье — в одной колонке");
+        assert!(got[1].x > got[0].x, "и колонка эта правая");
+        assert_eq!(got[1].y, LAPTOP.y);
+        assert_eq!(got[2].y, got[1].y + got[1].height, "делят её без щели");
     }
 
     #[test]
-    fn the_margin_is_taken_before_the_rows_are_cut() {
-        // Отрежь его после деления — и досталось бы оно только нижнему ряду, а
-        // ряды вышли бы разной высоты.
-        let got = arrange(Layout::Tile, WIDE, 8);
-        let rows: std::collections::BTreeSet<i32> = got.iter().map(|b| b.y).collect();
-        assert_eq!(rows.len(), 2);
-        let h = (WIDE.height - TILE_MARGIN_PT) / 2;
-        assert!(got.iter().all(|b| b.height == h), "оба ряда одной высоты: {got:?}");
+    fn the_tiles_cover_the_whole_work_area() {
+        // «Заполнять весь экран» проверяется площадью: сумма площадей окон
+        // равна площади рабочей области, а перекрытий нет (соседний тест).
+        // Щель в пару точек от деления нацело сюда бы не прошла.
+        for n in 2..=9 {
+            for work in [LAPTOP, WIDE] {
+                let got = arrange(Layout::Tile, work, n);
+                if (n as i32) < columns(work.width) {
+                    continue; // окон меньше, чем колонок, — пустые колонки законны
+                }
+                let covered: i64 = got.iter().map(|b| i64::from(b.width) * i64::from(b.height)).sum();
+                let whole = i64::from(work.width) * i64::from(work.height);
+                assert_eq!(covered, whole, "{n} окон на {}: {got:?}", work.width);
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_window_takes_one_column_on_the_left() {
+        // Половина ширины, а не весь экран: растянутое на весь, окно было бы
+        // вдвое шире тех 120 знаков, ради которых колонки и считаются.
+        let got = arrange(Layout::Tile, LAPTOP, 1);
+        assert_eq!(got[0], Bounds { x: LAPTOP.x, y: LAPTOP.y, width: 720, height: LAPTOP.height });
+    }
+
+    #[test]
+    fn the_fullest_column_is_not_the_first_one() {
+        // Первое окно списка — самое верхнее в пикере, и колонка ему достаётся
+        // целиком. Раздай мы остаток слева, полную высоту получало бы
+        // последнее, до которого человеку дела меньше всего.
+        let got = arrange(Layout::Tile, LAPTOP, 5);
+        let left: Vec<&Bounds> = got.iter().filter(|b| b.x == LAPTOP.x).collect();
+        let right: Vec<&Bounds> = got.iter().filter(|b| b.x > LAPTOP.x).collect();
+        assert_eq!((left.len(), right.len()), (2, 3), "{got:?}");
     }
 
     #[test]
@@ -309,56 +344,34 @@ mod tests {
     fn a_narrow_screen_takes_fewer_columns_than_three() {
         // 1440 на три — по 480 точек, это 57 колонок. Три сюда не влезают, и
         // правило «не меньше 80» важнее идеала «три в ряд».
-        let got = arrange(Layout::Tile, LAPTOP, 3);
-        let in_top_row = got.iter().filter(|b| b.y == LAPTOP.y).count();
-        assert_eq!(in_top_row, 2, "на ноутбуке в ряд встают двое");
-        assert!(got[2].y > got[0].y, "третье окно ушло во второй ряд");
+        assert_eq!(columns(LAPTOP.width), 2);
     }
 
     #[test]
     fn a_wide_screen_takes_more_columns_than_three() {
         // 3440 на три — по 1146 точек, это 140 колонок. Строку такой ширины
         // глаз не доносит до конца, поэтому колонок становится четыре.
-        let got = arrange(Layout::Tile, WIDE, 4);
-        let in_top_row = got.iter().filter(|b| b.y == WIDE.y).count();
-        assert_eq!(in_top_row, 4, "на широком экране в ряд встают четверо");
+        assert_eq!(columns(WIDE.width), 4);
     }
 
     #[test]
-    fn windows_in_a_row_do_not_overlap() {
-        // Плитка тем и отличается от каскада: перекрытий нет.
-        for n in 1..=8 {
-            let got = arrange(Layout::Tile, WIDE, n);
-            for pair in got.windows(2) {
-                let (a, b) = (pair[0], pair[1]);
-                if a.y != b.y {
-                    continue;
+    fn tiles_never_overlap() {
+        // Плитка тем и отличается от каскада: перекрытий нет — ни в колонке,
+        // ни между колонками.
+        for n in 1..=9 {
+            for work in [LAPTOP, WIDE] {
+                let got = arrange(Layout::Tile, work, n);
+                for (i, a) in got.iter().enumerate() {
+                    for b in got.iter().skip(i + 1) {
+                        let apart = a.x + a.width <= b.x
+                            || b.x + b.width <= a.x
+                            || a.y + a.height <= b.y
+                            || b.y + b.height <= a.y;
+                        assert!(apart, "{n} окон: {a:?} лезет на {b:?}");
+                    }
                 }
-                assert!(a.x + a.width <= b.x, "{n} окон: {a:?} лезет на {b:?}");
             }
         }
-    }
-
-    #[test]
-    fn a_short_row_stands_in_the_middle() {
-        // Два окна на широком экране: ширина обрезана по 120 колонкам, и без
-        // центровки они прижались бы к левому краю, оставив пустоту справа.
-        let got = arrange(Layout::Tile, WIDE, 2);
-        let left = got[0].x - WIDE.x;
-        let right = WIDE.x + WIDE.width - (got[1].x + got[1].width);
-        assert!((left - right).abs() <= 1, "поля слева {left} и справа {right} равны");
-        assert!(left > 0, "поля вообще есть — иначе центровки не было");
-    }
-
-    #[test]
-    fn the_last_row_is_centred_too() {
-        // Пять окон при четырёх колонках: во втором ряду одно, и стоять ему
-        // посреди экрана, а не в левом углу под первым.
-        let got = arrange(Layout::Tile, WIDE, 5);
-        let last = got[4];
-        let left = last.x - WIDE.x;
-        let right = WIDE.x + WIDE.width - (last.x + last.width);
-        assert!((left - right).abs() <= 1, "одинокое окно ряда стоит посередине");
     }
 
     #[test]
@@ -367,8 +380,9 @@ mod tests {
         // Оба ограничения разом не выполнить; побеждает нижнее, и окно
         // остаётся одно на ряд, шире обещанного.
         let narrow = Bounds { x: 0, y: 25, width: 1000, height: 800 };
+        assert_eq!(columns(narrow.width), 1);
         let got = arrange(Layout::Tile, narrow, 2);
-        assert!(got[0].y < got[1].y, "оба окна в своём ряду");
+        assert!(got[0].y < got[1].y, "окна встали друг под другом в одной колонке");
         assert!(got[0].width >= min_width(), "ширина не опустилась ниже 80 колонок");
     }
 
