@@ -11,6 +11,9 @@ use mwm_core::tracker::Seen;
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{Bounds, Display, Seen};
+    // Внутри `imp`, а не в шапке файла: жалобы отсюда идут только под macOS, и
+    // на любой другой машине импорт в шапке висел бы неиспользованным.
+    use mwm_core::mwm_log;
     // Обёртка `accessibility` поверх `accessibility-sys` берёт на себя ровно
     // то, ради чего пришлось бы писать свой тип: `AXUIElement` там —
     // полноценный CF-тип, а значит `Clone` считает ссылки, а `PartialEq` —
@@ -119,7 +122,7 @@ mod imp {
             // дошли, а stderr виден и в `cargo run`, и в Console.app у
             // упакованного `.app`.
             if let Err(e) = el.set_messaging_timeout(MESSAGING_TIMEOUT_S) {
-                eprintln!("mwm: set_messaging_timeout failed for pid {pid} ({id}): {e:?}");
+                mwm_log!("set_messaging_timeout failed for pid {pid} ({id}): {e:?}");
             }
             // Фронтовое окно спрашивается только у фронтового приложения:
             // у остальных ответ есть, но означает он «последнее активное здесь»,
@@ -494,7 +497,7 @@ mod imp {
         let ids = match CGDisplay::active_displays() {
             Ok(ids) => ids,
             Err(e) => {
-                eprintln!("mwm: CGGetActiveDisplayList failed: {e}");
+                mwm_log!("CGGetActiveDisplayList failed: {e}");
                 return Vec::new();
             }
         };

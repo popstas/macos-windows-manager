@@ -11,6 +11,7 @@ mod dump;
 mod mqtt;
 
 use mwm_core::config::{config_path, parse_config, Config};
+use mwm_core::mwm_log;
 use mwm_core::publish::{build_file, fingerprint, should_write};
 use mwm_core::tracker::Tracker;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,7 +159,7 @@ fn reject_null_values(patch: &serde_json::Value) -> Result<(), String> {
 fn restrict_permissions(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        eprintln!("mwm: cannot restrict {}: {e}", path.display());
+        mwm_log!("cannot restrict {}: {e}", path.display());
     }
 }
 
@@ -302,7 +303,7 @@ fn run_tracker(
                     }
                     let note = serve(&req, &mut tracker, &registry, &window_of, &work);
                     if let Some(note) = note {
-                        eprintln!("mwm: {note}");
+                        mwm_log!("{note}");
                         *status.0.lock().unwrap() = note;
                     }
                 }
@@ -331,7 +332,7 @@ fn run_tracker(
             if !told_untrusted {
                 let exe = std::env::current_exe().ok();
                 for line in mwm_core::permissions::accessibility_missing(exe.as_deref()).lines() {
-                    eprintln!("mwm: {line}");
+                    mwm_log!("{line}");
                 }
                 told_untrusted = true;
             }
@@ -364,7 +365,7 @@ fn run_tracker(
                 let target = mwm_core::geometry::clamp_to_displays(want, &screens);
                 if let Err(e) = ax::place(&registry, window_id, target) {
                     // Молчать нельзя: «поставил» и «не смог» отличаются только этим.
-                    eprintln!("mwm: place failed: {e}");
+                    mwm_log!("place failed: {e}");
                     place_note = format!("place failed: {e}");
                 }
             }
@@ -430,12 +431,12 @@ fn run_tracker(
             // окон или другие заголовки у них, то есть ровно то, ради чего
             // строку и читают.
             //
-            // Время в строке — единственное во всём stderr, и стоит оно здесь
-            // не для красоты: launchd отметок не ставит, а жалоба нужна затем,
-            // чтобы лечь рядом с событием на другой машине (сон, разрыв,
-            // перезапуск) — без времени сводить её не с чем.
+            // Время здесь больше не ставится вручную: его несёт теперь каждая
+            // строка лога (`log::stamped`), и довод, стоявший на этом месте,
+            // оказался верен для всех — launchd отметок не ставит, а жалобу
+            // сводят с событием на другой машине (сон, разрыв, перезапуск).
             Some(note) if last_diag.as_deref() != Some(note.as_str()) => {
-                eprintln!("mwm: {} {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+                mwm_log!("{note}");
                 last_diag = Some(note);
             }
             Some(_) => {}
@@ -545,7 +546,7 @@ fn run_tracker(
                 &state_path,
                 &mwm_core::state::state_json(&tracker.slots_state()),
             ) {
-                eprintln!("mwm: state write failed: {e}");
+                mwm_log!("state write failed: {e}");
             }
         }
 
@@ -626,7 +627,7 @@ fn load_snapshots(path: &std::path::Path) -> Vec<mwm_core::snapshots::Snapshot> 
     use mwm_core::snapshots::{Snapshot, SnapshotSession};
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        eprintln!("mwm: broken snapshots file, starting empty");
+        mwm_log!("broken snapshots file, starting empty");
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -688,7 +689,7 @@ fn save_snapshots(path: &std::path::Path, snaps: &[mwm_core::snapshots::Snapshot
         })).collect::<Vec<_>>(),
     });
     if let Err(e) = mwm_core::state::write_atomic(path, &value) {
-        eprintln!("mwm: snapshots write failed: {e}");
+        mwm_log!("snapshots write failed: {e}");
     }
 }
 
@@ -783,7 +784,7 @@ fn arrange(
         .zip(mwm_core::layout::arrange(mode, area, order.len()))
     {
         if let Err(e) = ax::place(registry, *window_id, want) {
-            eprintln!("mwm: place failed: {e}");
+            mwm_log!("place failed: {e}");
             failed += 1;
             last = e;
         }
@@ -799,7 +800,7 @@ fn arrange(
     // почему не видно окна.
     let raise_note = ax::bring_to_front(registry, &order).err();
     if let Some(e) = raise_note.as_deref() {
-        eprintln!("mwm: {e}");
+        mwm_log!("{e}");
     }
     // Жалоба называет число: одно неподатливое окно из шести — не то же самое,
     // что раскладка, не сработавшая вовсе.
@@ -847,6 +848,17 @@ fn save_settings(shared: tauri::State<'_, Shared>, patch: serde_json::Value) -> 
     Ok(())
 }
 
+/// Отдать вкладке Log то, что накопилось в буфере.
+///
+/// Не `Result`: читать тут нечего — буфер живёт в памяти этого же процесса, и
+/// отказать он может разве что паникой соседнего потока, которую `log::lines`
+/// и переживает молча. Отказ, который нельзя показать иначе как в том же
+/// логе, показывать было бы негде.
+#[tauri::command]
+fn read_log() -> Vec<String> {
+    mwm_core::log::lines()
+}
+
 /// Открыть окно настроек.
 ///
 /// Создаётся лениво: объявленное в `tauri.conf.json` окно поднималось бы на
@@ -891,7 +903,7 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
     // отвечать на это ошибкой значило бы пугать человека тем, что он и так
     // видит. Но и молчать нельзя — в лог.
     if let Err(e) = ax::activate_self() {
-        eprintln!("mwm: {e}");
+        mwm_log!("{e}");
     }
     Ok(())
 }
@@ -909,7 +921,7 @@ fn ask(app: &tauri::AppHandle, mode: mwm_core::layout::Layout) {
     let asking = app.state::<Asking>();
     let sent = asking.0.lock().map_err(|e| e.to_string()).and_then(|tx| tx.send(req).map_err(|e| e.to_string()));
     if let Err(e) = sent {
-        eprintln!("mwm: cannot ask for a layout: {e}");
+        mwm_log!("cannot ask for a layout: {e}");
     }
 }
 
@@ -933,7 +945,7 @@ fn register_tile_hotkey(app: &tauri::AppHandle, wanted: &str) -> (bool, String) 
     let (shortcut, accelerator) = match wanted.parse::<Shortcut>() {
         Ok(sc) => (sc, wanted.to_string()),
         Err(e) => {
-            eprintln!("mwm: cannot parse tileHotkey {wanted}: {e}, using default");
+            mwm_log!("cannot parse tileHotkey {wanted}: {e}, using default");
             let fallback = mwm_core::config::DEFAULT_TILE_HOTKEY;
             match fallback.parse::<Shortcut>() {
                 Ok(sc) => (sc, fallback.to_string()),
@@ -941,7 +953,7 @@ fn register_tile_hotkey(app: &tauri::AppHandle, wanted: &str) -> (bool, String) 
                 // молчать о ней нельзя, но и падать незачем: трей с рабочим
                 // пунктом меню полезнее, чем не поднявшееся приложение.
                 Err(e) => {
-                    eprintln!("mwm: default hotkey {fallback} does not parse: {e}");
+                    mwm_log!("default hotkey {fallback} does not parse: {e}");
                     return (false, fallback.to_string());
                 }
             }
@@ -958,7 +970,7 @@ fn register_tile_hotkey(app: &tauri::AppHandle, wanted: &str) -> (bool, String) 
         Err(e) => {
             // Отказ не фатален и обязан быть виден: сочетание мог занять кто
             // угодно, и человек об этом узнает только из подписи пункта.
-            eprintln!("mwm: cannot register tile hotkey {accelerator}: {e}");
+            mwm_log!("cannot register tile hotkey {accelerator}: {e}");
             false
         }
     };
@@ -987,7 +999,12 @@ fn main() {
         // Плагин хоткеев — единственный способ услышать клавишу, когда впереди
         // чужое приложение: у трея окон нет вовсе, и слушать некому.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![load_settings, save_settings, open_settings])
+        .invoke_handler(tauri::generate_handler![
+            load_settings,
+            save_settings,
+            open_settings,
+            read_log
+        ])
         .setup(|app| {
             // Окон у приложения нет, значит и месту в доке взяться неоткуда.
             // Без этой строки macOS считает процесс обычным приложением и
@@ -1122,7 +1139,7 @@ fn main() {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) = open_settings(app).await {
-                                eprintln!("mwm: {e}");
+                                mwm_log!("{e}");
                             }
                         });
                     }
@@ -1430,6 +1447,12 @@ mod tests {
             page.contains("after restart"),
             "группа MQTT обязана честно говорить, что действует после перезапуска"
         );
+        // Вкладка Log — единственный способ увидеть лог у приложения,
+        // запущенного из `.app`: stderr оттуда уходит в никуда. Пропади она из
+        // формы — команда `read_log` осталась бы жива и никем не зовущаяся, а
+        // поломка выглядела бы как «трекер молчит».
+        assert!(page.contains("read_log"), "вкладка Log перестала спрашивать буфер");
+        assert!(page.contains("id: 'log'"), "вкладка Log пропала из формы");
         // Группы разъехались по вкладкам, и вкладка заводится по `id` группы.
         // Забудь его — `renderTabs` нарисует пункт с `data-tab="undefined"`, и
         // с экрана пропадёт не одно поле, а вся группа разом. Сторож выше
