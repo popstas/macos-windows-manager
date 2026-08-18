@@ -265,6 +265,10 @@ fn run_tracker(
     // картина, а не прошедший срок.
     let mut last_diag: Option<String> = None;
     let mut last_write_ms = 0u64;
+    // Каталог файлов трекеров у себя. Считается один раз: дом за жизнь
+    // процесса не переезжает, а `remoteDir` из конфига сюда не годится — это
+    // путь на **чужой** машине, и разворачивать его тильду здесь некому.
+    let local_windows_dir = mwm_core::config::local_windows_dir(&std::env::var("HOME").unwrap_or_default());
     let pid = std::process::id();
     loop {
         // Настройки берутся один раз за оборот, а не по месту: иначе половина
@@ -525,6 +529,15 @@ fn run_tracker(
             .as_deref()
             .map_or_else(String::new, |e| format!("index fetch failed: {e}"));
 
+        // Отдельно от удалённой: чинят их в разных местах — ту на машине
+        // агрегатора, эту у себя, — и одна, спрятавшая другую, отправила бы
+        // человека не туда. Отсутствующий местный дамп сюда не попадает
+        // вовсе: это честно выключенная половина, а не отказ.
+        let local_fetch_note = cache
+            .local_error
+            .as_deref()
+            .map_or_else(String::new, |e| format!("local index unreadable: {e}"));
+
         // Файл состояния пишется с `fsync`, и писать его на каждом такте —
         // плата за то, что не изменилось.
         if tracker.take_dirty() {
@@ -555,7 +568,25 @@ fn run_tracker(
                 // которые эта машина больше не ведёт.
                 if features.snapshots { &snaps } else { &[] },
             );
-            let notes = [place_note.as_str(), fetch_note.as_str()];
+            // Второй адрес — свой же каталог: там файл читает агрегатор этой
+            // машины, и только оттуда окно доедет до сессии, которая работает
+            // здесь. Отказ этой записи не отменяет удачи первой и наоборот:
+            // адреса разные, читатели разные, и общий отказ на двоих скрыл бы
+            // от человека, какая половина цела.
+            let local_note = if features.local_source {
+                match deliver::write_local(&local_windows_dir, &cfg.host, &payload) {
+                    Ok(()) => String::new(),
+                    Err(e) => format!("local publish failed: {e}"),
+                }
+            } else {
+                String::new()
+            };
+            let notes = [
+                place_note.as_str(),
+                fetch_note.as_str(),
+                local_fetch_note.as_str(),
+                local_note.as_str(),
+            ];
             match deliver::send(&cfg, &payload) {
                 Ok(()) => {
                     last_print = Some(print);
@@ -570,14 +601,19 @@ fn run_tracker(
                     *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
             }
-        } else if !place_note.is_empty() || !fetch_note.is_empty() {
+        } else if !place_note.is_empty()
+            || !fetch_note.is_empty()
+            || !local_fetch_note.is_empty()
+        {
             // Расклад не менялся, публикации в этом такте не было — но отказ
             // расстановки и ошибка чтения дампа не должны ждать следующей
             // записи файла, до неё может быть далеко (или не наступить вовсе,
             // пока отпечаток не сдвинется).
             let base = format!("{} windows tracked", bound.len());
-            *status.0.lock().unwrap() =
-                mwm_core::status::status_line(&base, &[place_note.as_str(), fetch_note.as_str()]);
+            *status.0.lock().unwrap() = mwm_core::status::status_line(
+                &base,
+                &[place_note.as_str(), fetch_note.as_str(), local_fetch_note.as_str()],
+            );
         }
     }
 }
@@ -1380,7 +1416,7 @@ mod tests {
         // ровно на этот случай.
         let page = include_str!("../../frontend/settings.html");
         for key in [
-            "placement", "snapshots", "requests",
+            "placement", "snapshots", "requests", "localSource",
             "sshHost", "remoteDir", "windowHost",
             "terminals", "tickMs", "dumpCacheMs", "tileHotkey",
             "host", "port", "user", "password", "base",
@@ -1609,5 +1645,28 @@ mod tests {
         // полуминуты спустя.
         assert!(src.contains("fingerprint(&bound, focus)"), "отпечаток берёт то же focus");
         assert!(src.contains("focus,\n"), "build_file получает то же focus");
+    }
+
+    #[test]
+    fn the_window_file_goes_to_both_addresses() {
+        // Половинки местного источника ходят парой: индекс без публикации
+        // привязал бы сессию, чьё окно никто не прочитает, а публикация без
+        // индекса написала бы файл, в котором местных сессий нет. Обе живут в
+        // такте, то есть поведением их не поймать — только текстом.
+        let src = tracker_source();
+        assert!(
+            src.contains("deliver::write_local(&local_windows_dir, &cfg.host, &payload)"),
+            "тот же payload обязан лечь и рядом с собой, а не только уехать по ssh"
+        );
+        assert!(
+            src.contains("if features.local_source {"),
+            "местная публикация обязана слушаться своего флага"
+        );
+        // Отказы двух дорог не сливаются в один: чинят их в разных местах, и
+        // общая жалоба отправила бы человека не туда.
+        assert!(
+            src.contains("local publish failed: {e}") && src.contains("local index unreadable: {e}"),
+            "у местной записи и местного чтения свои жалобы"
+        );
     }
 }

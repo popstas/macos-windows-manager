@@ -37,11 +37,23 @@ pub struct Features {
     pub snapshots: bool,
     /// Исполнять ли просьбы, приехавшие по MQTT.
     pub requests: bool,
+    /// Считать ли, что агрегатор есть и на этой машине.
+    ///
+    /// Включённый, он добавляет по половинке с каждой стороны: индекс сессий
+    /// читается ещё и из местного дампа, а файл окон кладётся ещё и рядом с
+    /// собой — туда, где его прочтёт местный агрегатор. Половинки поодиночке
+    /// бесполезны, поэтому выключатель один: индекс без местной публикации
+    /// привязал бы сессию, чьё окно никто не увидит, а публикация без индекса
+    /// записала бы файл, в котором местных сессий нет.
+    ///
+    /// Умолчание `true` ничего не стоит машине без местного агрегатора: дампа
+    /// там нет, значит и индекс пуст, а лишний файл окон читать некому.
+    pub local_source: bool,
 }
 
 impl Default for Features {
     fn default() -> Self {
-        Self { placement: true, snapshots: true, requests: true }
+        Self { placement: true, snapshots: true, requests: true, local_source: true }
     }
 }
 
@@ -257,6 +269,7 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         placement: flag("placement"),
         snapshots: flag("snapshots"),
         requests: flag("requests"),
+        local_source: flag("localSource"),
     };
 
     Config {
@@ -310,6 +323,7 @@ pub fn to_json(cfg: &Config) -> serde_json::Value {
             "placement": cfg.features.placement,
             "snapshots": cfg.features.snapshots,
             "requests": cfg.features.requests,
+            "localSource": cfg.features.local_source,
         },
     })
 }
@@ -318,6 +332,25 @@ pub fn to_json(cfg: &Config) -> serde_json::Value {
 /// рядом.
 pub fn config_path(home: &str) -> String {
     format!("{home}/.config/macos-windows-manager/config.yaml")
+}
+
+/// Дамп агрегатора этой машины — там, где его пишет сам агрегатор.
+///
+/// Своего ключа в конфиге у пути нет намеренно: это умолчание `ccfzf`
+/// (`CCFZF_SESSIONS_FILE`), и второе место, где его можно назвать, разошлось
+/// бы с первым молча — трекер читал бы файл, которого агрегатор не пишет.
+pub fn local_dump_path(home: &str) -> String {
+    format!("{home}/.ccfzf.sessions.json")
+}
+
+/// Каталог файлов трекеров на этой машине — умолчание `CCFZF_WINDOWS_DIR`.
+///
+/// Тот же `~/.ccfzf/windows`, что стоит умолчанием в `remoteDir`, но
+/// разворачивается он здесь и от своего дома: `remoteDir` — путь на **чужой**
+/// машине, и брать его для местной записи значило бы писать по тильде,
+/// которую некому разворачивать.
+pub fn local_windows_dir(home: &str) -> String {
+    format!("{home}/.ccfzf/windows")
 }
 
 #[cfg(test)]
@@ -558,16 +591,22 @@ mod tests {
         // раньше: блока `features:` в них нет и не будет, пока человек его не
         // напишет.
         let c = parse_config("sshHost: remote-host\n", "mac-host");
-        assert_eq!(c.features, Features { placement: true, snapshots: true, requests: true });
+        assert_eq!(
+            c.features,
+            Features { placement: true, snapshots: true, requests: true, local_source: true }
+        );
     }
 
     #[test]
     fn features_are_read() {
         let c = parse_config(
-            "features:\n  placement: false\n  snapshots: false\n  requests: false\n",
+            "features:\n  placement: false\n  snapshots: false\n  requests: false\n  localSource: false\n",
             "mac-host",
         );
-        assert_eq!(c.features, Features { placement: false, snapshots: false, requests: false });
+        assert_eq!(
+            c.features,
+            Features { placement: false, snapshots: false, requests: false, local_source: false }
+        );
     }
 
     #[test]

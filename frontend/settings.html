@@ -67,6 +67,13 @@
         'Let the picker ask this machine to raise a window or mark a session unread. '
         + 'Switched off, the tracker also stops announcing that it can — the picker '
         + 'offers no Enter instead of offering one that does nothing.'],
+      ['features.localSource', 'check', 'Also track sessions running on this machine',
+        'Read the session list from the aggregator on this machine as well as the '
+        + 'remote one, and put the window file next to it, where that aggregator '
+        + 'reads it. Without this, a session running here shows no window in the '
+        + 'picker: its name is missing from the remote list, so there is nothing to '
+        + 'match the window title against. Costs nothing on a machine that keeps no '
+        + 'aggregator of its own — there is no local list to read.'],
     ]},
     { title: 'Connection', fields: [
       ['sshHost', 'text', 'Machine where sessions and the aggregator live'],
