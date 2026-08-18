@@ -45,15 +45,21 @@ const CHROME_PT: i32 = 24;
 const MIN_COLS: i32 = 80;
 const MAX_COLS: i32 = 120;
 
-/// Полоса меню сверху.
+/// Полоса меню сверху — только для запасной рабочей области.
 ///
-/// `CGDisplay::bounds()` отдаёт весь экран, а не рабочую область: в нём и
-/// полоса меню, и Dock. Рабочую область знает `NSScreen::visibleFrame`, но это
-/// API главного потока, а расстановка идёт в потоке трекера — ровно поэтому в
-/// `ax::displays()` и выбран `CGDisplay`. Отступ поэтому постоянный. Dock не
-/// учитывается вовсе: он бывает снизу, слева и справа, прячется и меняет
-/// толщину, и постоянного числа для него не существует.
+/// Настоящую отдаёт `NSScreen::visibleFrame`, и в ней вычтен и Dock, с какой бы
+/// стороны он ни стоял. Но это API главного потока, а расстановка идёт в потоке
+/// трекера, и в тот такт, когда рабочая область ещё не приехала, считать нужно
+/// хоть по чему-то. Полоса меню — то единственное, что можно назвать числом:
+/// Dock прячется, переезжает и меняет толщину.
 const MENUBAR_PT: i32 = 25;
+
+/// Поле снизу у плитки.
+///
+/// Экран целиком плитка не занимает намеренно: окно, прижатое к нижнему краю,
+/// упирается в Dock, а его край — это ещё и то место, куда человек ведёт мышь,
+/// чтобы Dock показать.
+const TILE_MARGIN_PT: i32 = 100;
 
 /// Наименьшая ширина окна: 80 колонок плюс рамка.
 fn min_width() -> i32 {
@@ -65,8 +71,11 @@ fn max_width() -> i32 {
     (f64::from(MAX_COLS) * COL_PT) as i32 + CHROME_PT
 }
 
-/// Рабочая область экрана — всё, кроме полосы меню.
-fn work_area(screen: Bounds) -> Bounds {
+/// Запасная рабочая область: экран без полосы меню.
+///
+/// Годится ровно до того такта, когда приедет настоящая. Dock здесь не вычтен —
+/// вычесть его числом нельзя.
+pub fn work_area(screen: Bounds) -> Bounds {
     Bounds {
         x: screen.x,
         y: screen.y + MENUBAR_PT,
@@ -75,9 +84,13 @@ fn work_area(screen: Bounds) -> Bounds {
     }
 }
 
-/// Разложить `n` окон по экрану. Порядок ответа — порядок окон.
-pub fn arrange(mode: Layout, screen: Bounds, n: usize) -> Vec<Bounds> {
-    let work = work_area(screen);
+/// Разложить `n` окон по рабочей области. Порядок ответа — порядок окон.
+///
+/// На входе именно рабочая область, а не экран: что из экрана вычесть, знает
+/// платформа (полосу меню и Dock отдаёт `NSScreen::visibleFrame`), и знание это
+/// здесь не повторяется — повторённое, оно разошлось бы с настоящим на первом
+/// же переезде Dock.
+pub fn arrange(mode: Layout, work: Bounds, n: usize) -> Vec<Bounds> {
     if n == 0 || work.width <= 0 || work.height <= 0 {
         return Vec::new();
     }
@@ -87,34 +100,38 @@ pub fn arrange(mode: Layout, screen: Bounds, n: usize) -> Vec<Bounds> {
     }
 }
 
-/// Сдвиг стопки вниз — высота заголовка окна.
+/// Ступенька каскада — вправо и вниз разом.
 ///
-/// Меньше нельзя, и это всё содержание каскада: заголовок — единственное, по
-/// чему человек выбирает окно из стопки мышью. Накрой соседнее окно заголовок —
-/// и стопка превращается в одно верхнее окно с полосками по краю.
-const STEP_Y: i32 = 28;
-
-/// Сдвиг стопки вправо. Заголовку не нужен, но без него окна сливаются в одну
-/// колонку, и глазом стопка не читается.
-const STEP_X: i32 = 36;
+/// Высоты заголовка хватило бы, чтобы окно опознать, но не чтобы за него
+/// ухватиться: полсотни точек дают и заголовок целиком, и поле под курсор.
+const STEP: i32 = 50;
 
 /// Стопка со сдвигом вправо и вниз.
 ///
-/// Все окна одного размера — половина экрана по каждой стороне. Кончится место
-/// на экране — стопка начинается заново от левого верхнего угла: окон, которым
-/// не хватило места на ступеньках, к этому времени полтора десятка, и экрану
-/// уже нечего им предложить, как ни считай.
+/// Окна одного размера: половина рабочей области по ширине, а по высоте —
+/// сколько осталось после ступенек. Высота потому и считается от числа окон в
+/// стопке: двум окнам ступенька нужна одна, и отдавать им столько же места,
+/// сколько десяти, значит впустую резать высоту.
+///
+/// Ступенек помещается столько, чтобы окно не стало ниже половины рабочей
+/// области и не уехало за правый край. Дальше стопка начинается заново от
+/// левого верхнего угла: окон, которым не хватило ступенек, к этому времени
+/// десяток, и экрану уже нечего им предложить, как ни считай.
 fn cascade(work: Bounds, n: usize) -> Vec<Bounds> {
     let w = work.width / 2;
-    let h = work.height / 2;
-    // Сколько ступенек помещается: по той стороне, где место кончится раньше.
-    let per_stack = 1 + (((work.height - h) / STEP_Y).min((work.width - w) / STEP_X)).max(0);
+    let room_right = (work.width - w) / STEP;
+    let room_down = (work.height / 2) / STEP;
+    let per_stack = 1 + room_right.min(room_down).max(0);
+    // Ступеньки считаются по стопке, а не по всему списку: в переполненной
+    // стопке их ровно `per_stack - 1`, и высота у всех окон одна.
+    let steps = (n as i32).min(per_stack) - 1;
+    let h = work.height - steps * STEP;
     (0..n as i32)
         .map(|i| {
             let step = i % per_stack;
             Bounds {
-                x: work.x + step * STEP_X,
-                y: work.y + step * STEP_Y,
+                x: work.x + step * STEP,
+                y: work.y + step * STEP,
                 width: w,
                 height: h,
             }
@@ -134,7 +151,14 @@ fn tile(work: Bounds, n: usize) -> Vec<Bounds> {
     // растянутый на полтора метра терминал читать нечем — глаз не доносит
     // строку до конца.
     let w = (work.width / cols).min(max_width());
-    let h = work.height / rows;
+    // Поле снизу отрезается до деления на ряды: иначе при двух рядах оно
+    // досталось бы только нижнему, и ряды вышли бы разной высоты.
+    let usable = if work.height > TILE_MARGIN_PT * 2 {
+        work.height - TILE_MARGIN_PT
+    } else {
+        work.height
+    };
+    let h = usable / rows;
     let mut out = Vec::with_capacity(n);
     for i in 0..n as i32 {
         let (row, col) = (i / cols, i % cols);
@@ -181,10 +205,10 @@ fn div_ceil(a: i32, b: i32) -> i32 {
 mod tests {
     use super::*;
 
-    /// Экран ноутбука: 1440×900 в точках.
-    const LAPTOP: Bounds = Bounds { x: 0, y: 0, width: 1440, height: 900 };
-    /// Широкий внешний монитор: 3440×1440.
-    const WIDE: Bounds = Bounds { x: 0, y: 0, width: 3440, height: 1440 };
+    /// Рабочая область ноутбука: 1440×900 без полосы меню.
+    const LAPTOP: Bounds = Bounds { x: 0, y: 25, width: 1440, height: 875 };
+    /// Рабочая область широкого монитора: 3440×1440 без полосы меню.
+    const WIDE: Bounds = Bounds { x: 0, y: 25, width: 3440, height: 1415 };
 
     #[test]
     fn names_from_the_request_are_understood() {
@@ -195,78 +219,38 @@ mod tests {
     }
 
     #[test]
-    fn a_cascade_window_is_half_the_screen() {
-        let got = arrange(Layout::Cascade, WIDE, 3);
-        let work_h = WIDE.height - MENUBAR_PT;
-        assert!(got.iter().all(|b| b.width == WIDE.width / 2 && b.height == work_h / 2), "{got:?}");
-    }
-
-    #[test]
-    fn every_cascade_window_shows_its_title() {
-        // Соль каскада: заголовок — единственное, по чему человек выбирает окно
-        // из стопки мышью. Сдвиг меньше высоты заголовка накрыл бы его соседним
-        // окном, и стопка стала бы одним верхним окном с полосками по краю.
-        let got = arrange(Layout::Cascade, WIDE, 5);
-        for pair in got.windows(2) {
-            assert!(pair[1].y - pair[0].y >= STEP_Y, "{:?} накрывает заголовок {:?}", pair[1], pair[0]);
-            assert!(pair[1].x > pair[0].x, "стопка сдвигается и вправо: {pair:?}");
-        }
-    }
-
-    #[test]
-    fn the_cascade_starts_below_the_menu_bar() {
-        let got = arrange(Layout::Cascade, WIDE, 1);
-        assert_eq!(got[0].x, WIDE.x);
-        assert_eq!(got[0].y, MENUBAR_PT);
-    }
-
-    #[test]
-    fn no_cascade_window_hangs_off_the_screen() {
-        // Ступеньки уводят окна вправо и вниз, и без счёта места последнее
-        // уехало бы за край — туда, где мышью его не достать.
-        for n in 1..=40 {
-            for screen in [LAPTOP, WIDE] {
-                let work_bottom = screen.y + screen.height;
-                for b in arrange(Layout::Cascade, screen, n) {
-                    assert!(b.x + b.width <= screen.x + screen.width, "{n}: {b:?}");
-                    assert!(b.y + b.height <= work_bottom, "{n}: {b:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_stack_that_ran_out_of_room_begins_anew() {
-        // Экран, на котором ступенек помещается всего семь. Восьмое окно
-        // начинает стопку заново от угла: место на ступеньках кончилось, и
-        // предложить ему экрану больше нечего.
-        let small = Bounds { x: 0, y: 0, width: 1000, height: 400 };
-        let got = arrange(Layout::Cascade, small, 9);
-        assert_eq!(got[7], got[0], "восьмое окно встало на место первого");
-        assert_eq!(got[8], got[1]);
-    }
-
-    #[test]
-    fn a_second_screen_holds_the_cascade_too() {
-        let right = Bounds { x: 1440, y: 0, width: 1440, height: 900 };
-        let got = arrange(Layout::Cascade, right, 4);
-        assert!(got.iter().all(|b| b.x >= right.x), "{got:?}");
-    }
-
-    #[test]
     fn nothing_to_place_is_not_a_layout() {
         assert!(arrange(Layout::Tile, WIDE, 0).is_empty());
     }
 
     #[test]
-    fn the_menu_bar_is_not_part_of_the_screen() {
-        // `CGDisplay::bounds()` отдаёт весь экран, полосу меню включительно.
-        // Разложи мы по нему — верхний ряд ушёл бы под меню, и заголовок
-        // первого окна человек не увидел бы вовсе.
-        let got = arrange(Layout::Tile, WIDE, 1);
-        assert_eq!(got[0].y, MENUBAR_PT);
-        assert_eq!(got[0].height, WIDE.height - MENUBAR_PT);
+    fn the_spare_work_area_is_the_screen_without_the_menu_bar() {
+        // Ею считают, пока не приехала настоящая — та, где вычтен и Dock.
+        let screen = Bounds { x: 0, y: 0, width: 1440, height: 900 };
+        assert_eq!(work_area(screen), LAPTOP);
     }
+
+    #[test]
+    fn the_layout_stays_inside_the_work_area() {
+        // Рабочая область приходит снаружи и экраном не обязана быть: Dock
+        // слева сдвигает её начало, снизу — укорачивает. Раскладка, считающая
+        // от экрана, положила бы окна под Dock.
+        let dock_on_the_left = Bounds { x: 80, y: 25, width: 1360, height: 875 };
+        for mode in [Layout::Tile, Layout::Cascade] {
+            for n in 1..=6 {
+                for b in arrange(mode, dock_on_the_left, n) {
+                    assert!(b.x >= dock_on_the_left.x, "{mode:?} {n}: {b:?}");
+                    assert!(b.y >= dock_on_the_left.y, "{mode:?} {n}: {b:?}");
+                    let right = dock_on_the_left.x + dock_on_the_left.width;
+                    let bottom = dock_on_the_left.y + dock_on_the_left.height;
+                    assert!(b.x + b.width <= right, "{mode:?} {n}: {b:?}");
+                    assert!(b.y + b.height <= bottom, "{mode:?} {n}: {b:?}");
+                }
+            }
+        }
+    }
+
+    // --- плитка ---
 
     #[test]
     fn three_windows_stand_in_one_row() {
@@ -274,9 +258,27 @@ mod tests {
         let got = arrange(Layout::Tile, WIDE, 3);
         assert_eq!(got.len(), 3);
         let ys: Vec<i32> = got.iter().map(|b| b.y).collect();
-        assert_eq!(ys, vec![MENUBAR_PT; 3], "один ряд — одна высота");
+        assert_eq!(ys, vec![WIDE.y; 3], "один ряд — одна высота");
         assert!(got[0].x < got[1].x && got[1].x < got[2].x, "порядок слева направо");
-        assert_eq!(got[0].height, WIDE.height - MENUBAR_PT, "ряд один — высота полная");
+    }
+
+    #[test]
+    fn a_row_keeps_a_margin_at_the_bottom() {
+        // Окно, прижатое к нижнему краю, упирается в Dock, а край экрана — это
+        // ещё и то место, куда ведут мышь, чтобы Dock показать.
+        let got = arrange(Layout::Tile, WIDE, 3);
+        assert_eq!(got[0].height, WIDE.height - TILE_MARGIN_PT);
+    }
+
+    #[test]
+    fn the_margin_is_taken_before_the_rows_are_cut() {
+        // Отрежь его после деления — и досталось бы оно только нижнему ряду, а
+        // ряды вышли бы разной высоты.
+        let got = arrange(Layout::Tile, WIDE, 8);
+        let rows: std::collections::BTreeSet<i32> = got.iter().map(|b| b.y).collect();
+        assert_eq!(rows.len(), 2);
+        let h = (WIDE.height - TILE_MARGIN_PT) / 2;
+        assert!(got.iter().all(|b| b.height == h), "оба ряда одной высоты: {got:?}");
     }
 
     #[test]
@@ -284,14 +286,9 @@ mod tests {
         // Соль ограничения: терминал уже 80 знаков ломает вывод любой команды,
         // которая рисует таблицу.
         for n in 1..=8 {
-            for screen in [LAPTOP, WIDE] {
-                for b in arrange(Layout::Tile, screen, n) {
-                    assert!(
-                        b.width >= min_width(),
-                        "{n} окон на {}: ширина {} меньше 80 колонок",
-                        screen.width,
-                        b.width
-                    );
+            for work in [LAPTOP, WIDE] {
+                for b in arrange(Layout::Tile, work, n) {
+                    assert!(b.width >= min_width(), "{n} окон на {}: {b:?}", work.width);
                 }
             }
         }
@@ -300,14 +297,9 @@ mod tests {
     #[test]
     fn no_window_is_wider_than_a_hundred_and_twenty_columns() {
         for n in 1..=8 {
-            for screen in [LAPTOP, WIDE] {
-                for b in arrange(Layout::Tile, screen, n) {
-                    assert!(
-                        b.width <= max_width(),
-                        "{n} окон на {}: ширина {} больше 120 колонок",
-                        screen.width,
-                        b.width
-                    );
+            for work in [LAPTOP, WIDE] {
+                for b in arrange(Layout::Tile, work, n) {
+                    assert!(b.width <= max_width(), "{n} окон на {}: {b:?}", work.width);
                 }
             }
         }
@@ -318,9 +310,8 @@ mod tests {
         // 1440 на три — по 480 точек, это 57 колонок. Три сюда не влезают, и
         // правило «не меньше 80» важнее идеала «три в ряд».
         let got = arrange(Layout::Tile, LAPTOP, 3);
-        let in_top_row = got.iter().filter(|b| b.y == MENUBAR_PT).count();
+        let in_top_row = got.iter().filter(|b| b.y == LAPTOP.y).count();
         assert_eq!(in_top_row, 2, "на ноутбуке в ряд встают двое");
-        assert_eq!(got.len(), 3);
         assert!(got[2].y > got[0].y, "третье окно ушло во второй ряд");
     }
 
@@ -329,18 +320,8 @@ mod tests {
         // 3440 на три — по 1146 точек, это 140 колонок. Строку такой ширины
         // глаз не доносит до конца, поэтому колонок становится четыре.
         let got = arrange(Layout::Tile, WIDE, 4);
-        let in_top_row = got.iter().filter(|b| b.y == MENUBAR_PT).count();
+        let in_top_row = got.iter().filter(|b| b.y == WIDE.y).count();
         assert_eq!(in_top_row, 4, "на широком экране в ряд встают четверо");
-    }
-
-    #[test]
-    fn more_windows_than_columns_split_the_height() {
-        // Ровно то, что просили: «если больше, то высоту делить на 2».
-        let got = arrange(Layout::Tile, WIDE, 8);
-        let rows: std::collections::BTreeSet<i32> = got.iter().map(|b| b.y).collect();
-        assert_eq!(rows.len(), 2, "восемь окон при четырёх колонках — два ряда");
-        let h = (WIDE.height - MENUBAR_PT) / 2;
-        assert!(got.iter().all(|b| b.height == h), "высота поделена поровну");
     }
 
     #[test]
@@ -363,8 +344,8 @@ mod tests {
         // Два окна на широком экране: ширина обрезана по 120 колонкам, и без
         // центровки они прижались бы к левому краю, оставив пустоту справа.
         let got = arrange(Layout::Tile, WIDE, 2);
-        let left = got[0].x;
-        let right = WIDE.width - (got[1].x + got[1].width);
+        let left = got[0].x - WIDE.x;
+        let right = WIDE.x + WIDE.width - (got[1].x + got[1].width);
         assert!((left - right).abs() <= 1, "поля слева {left} и справа {right} равны");
         assert!(left > 0, "поля вообще есть — иначе центровки не было");
     }
@@ -375,20 +356,9 @@ mod tests {
         // посреди экрана, а не в левом углу под первым.
         let got = arrange(Layout::Tile, WIDE, 5);
         let last = got[4];
-        let left = last.x;
-        let right = WIDE.width - (last.x + last.width);
+        let left = last.x - WIDE.x;
+        let right = WIDE.x + WIDE.width - (last.x + last.width);
         assert!((left - right).abs() <= 1, "одинокое окно ряда стоит посередине");
-    }
-
-    #[test]
-    fn a_second_screen_gets_its_own_coordinates() {
-        // Экран не обязан начинаться в нуле: у второго монитора начало — там,
-        // где кончился первый. Раскладка, забывшая про это, разложила бы окна
-        // на чужом экране.
-        let right = Bounds { x: 1440, y: 0, width: 1440, height: 900 };
-        let got = arrange(Layout::Tile, right, 2);
-        assert!(got.iter().all(|b| b.x >= right.x), "{got:?}");
-        assert!(got.iter().all(|b| b.x + b.width <= right.x + right.width), "{got:?}");
     }
 
     #[test]
@@ -396,9 +366,87 @@ mod tests {
         // Экран, на котором одна колонка уже шире 120 знаков, а две — уже 80.
         // Оба ограничения разом не выполнить; побеждает нижнее, и окно
         // остаётся одно на ряд, шире обещанного.
-        let narrow = Bounds { x: 0, y: 0, width: 1000, height: 800 };
+        let narrow = Bounds { x: 0, y: 25, width: 1000, height: 800 };
         let got = arrange(Layout::Tile, narrow, 2);
-        assert_eq!(got[0].y + got[0].height, got[1].y, "оба окна в своём ряду");
+        assert!(got[0].y < got[1].y, "оба окна в своём ряду");
         assert!(got[0].width >= min_width(), "ширина не опустилась ниже 80 колонок");
+    }
+
+    // --- каскад ---
+
+    #[test]
+    fn a_cascade_window_is_half_the_width() {
+        let got = arrange(Layout::Cascade, WIDE, 3);
+        assert!(got.iter().all(|b| b.width == WIDE.width / 2), "{got:?}");
+    }
+
+    #[test]
+    fn a_cascade_takes_all_the_height_the_steps_leave() {
+        // «Высота насколько возможно, за вычетом отступов»: три окна тратят две
+        // ступеньки, и высота у них — рабочая область минус эти две.
+        let got = arrange(Layout::Cascade, WIDE, 3);
+        assert!(got.iter().all(|b| b.height == WIDE.height - 2 * STEP), "{got:?}");
+    }
+
+    #[test]
+    fn two_windows_do_not_pay_for_steps_they_do_not_take() {
+        // Высота считается по числу окон в стопке, а не по её вместимости:
+        // двум окнам ступенька нужна одна.
+        let two = arrange(Layout::Cascade, WIDE, 2);
+        let five = arrange(Layout::Cascade, WIDE, 5);
+        assert_eq!(two[0].height, WIDE.height - STEP);
+        assert!(two[0].height > five[0].height, "у двоих окон высота больше, чем у пятерых");
+    }
+
+    #[test]
+    fn every_cascade_window_can_be_grabbed_by_its_title() {
+        // Соль каскада: заголовок — единственное, по чему человек выбирает окно
+        // из стопки мышью, и полсотни точек дают не только увидеть его, но и
+        // попасть в него курсором.
+        let got = arrange(Layout::Cascade, WIDE, 5);
+        for pair in got.windows(2) {
+            assert_eq!(pair[1].y - pair[0].y, STEP, "{pair:?}");
+            assert_eq!(pair[1].x - pair[0].x, STEP, "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_cascade_starts_at_the_corner_of_the_work_area() {
+        let got = arrange(Layout::Cascade, WIDE, 1);
+        assert_eq!((got[0].x, got[0].y), (WIDE.x, WIDE.y));
+        assert_eq!(got[0].height, WIDE.height, "одному окну ступеньки не нужны");
+    }
+
+    #[test]
+    fn no_cascade_window_hangs_off_the_screen() {
+        // Ступеньки уводят окна вправо и вниз, и без счёта места последнее
+        // уехало бы за край — туда, где мышью его не достать.
+        for n in 1..=40 {
+            for work in [LAPTOP, WIDE] {
+                for b in arrange(Layout::Cascade, work, n) {
+                    assert!(b.x + b.width <= work.x + work.width, "{n}: {b:?}");
+                    assert!(b.y + b.height <= work.y + work.height, "{n}: {b:?}");
+                    assert!(b.height >= work.height / 2, "{n}: окно ниже половины: {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stack_that_ran_out_of_room_begins_anew() {
+        // Ступенек тут помещается ровно восемь: 875/2 = 437 точек вниз.
+        // Девятое окно начинает стопку заново от угла — предложить ему экрану
+        // больше нечего.
+        let got = arrange(Layout::Cascade, LAPTOP, 12);
+        let wrap = (1..got.len()).find(|&i| got[i] == got[0]).expect("стопка началась заново");
+        assert_eq!(wrap, 9, "ступенек помещается восемь: 875/2 = 437 точек вниз");
+        assert!(got[wrap - 1].y > got[0].y, "до переноса стопка шла вниз");
+    }
+
+    #[test]
+    fn a_second_screen_holds_the_cascade_too() {
+        let right = Bounds { x: 1440, y: 25, width: 1440, height: 875 };
+        let got = arrange(Layout::Cascade, right, 4);
+        assert!(got.iter().all(|b| b.x >= right.x), "{got:?}");
     }
 }

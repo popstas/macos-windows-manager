@@ -36,6 +36,15 @@ struct Status(Arc<Mutex<String>>);
 #[derive(Clone)]
 struct Windows(Arc<Mutex<Vec<String>>>);
 
+/// Рабочая область главного экрана, как её видит главный поток.
+///
+/// Отдельная ячейка ровно затем, что спросить её может только главный поток
+/// (`NSScreen` — API AppKit), а нужна она тому, который двигает окна. Обновляет
+/// её рисовальщик меню — он и так заходит на главный поток каждые две секунды,
+/// а Dock переезжает реже.
+#[derive(Clone)]
+struct Work(Arc<Mutex<Option<mwm_core::geometry::Bounds>>>);
+
 /// Куда пункт меню кладёт просьбу.
 ///
 /// Двигать окна из главного потока нельзя: реестр `AXUIElement` не `Send` и
@@ -224,6 +233,7 @@ fn run_tracker(
     windows: Windows,
     requests: std::sync::mpsc::Receiver<mwm_core::request::Request>,
     to_requests: std::sync::mpsc::Sender<mwm_core::request::Request>,
+    work: Work,
 ) {
     // Копия при старте — для того, что на лету не меняется: путей состояния и
     // потока подписки. Всё, что читается каждый оборот, берётся из ячейки
@@ -286,7 +296,7 @@ fn run_tracker(
                     if !features.requests {
                         continue;
                     }
-                    let note = serve(&req, &mut tracker, &registry, &window_of);
+                    let note = serve(&req, &mut tracker, &registry, &window_of, &work);
                     if let Some(note) = note {
                         eprintln!("mwm: {note}");
                         *status.0.lock().unwrap() = note;
@@ -658,6 +668,7 @@ fn serve(
     tracker: &mut Tracker,
     registry: &ax::Registry,
     window_of: &std::collections::HashMap<String, u64>,
+    work: &Work,
 ) -> Option<String> {
     use mwm_core::request::Request;
     match req {
@@ -674,7 +685,9 @@ fn serve(
             tracker.mark_unread(id);
             None
         }
-        Request::Arrange { mode, ids } => arrange(*mode, ids, tracker, registry, window_of),
+        Request::Arrange { mode, ids } => {
+            arrange(*mode, ids, tracker, registry, window_of, work)
+        }
     }
 }
 
@@ -689,9 +702,20 @@ fn arrange(
     tracker: &Tracker,
     registry: &ax::Registry,
     window_of: &std::collections::HashMap<String, u64>,
+    work: &Work,
 ) -> Option<String> {
-    let Some(screen) = ax::main_display() else {
-        return Some("place: no main display".to_string());
+    // Настоящая рабочая область приезжает с главного потока и знает про Dock с
+    // любой стороны. Запасная — экран без полосы меню — считается здесь только
+    // до первого захода рисовальщика: Dock в ней не вычтен, и окна слева уйдут
+    // под него, но это одна раскладка в первые две секунды после запуска,
+    // а отказ был бы виден всегда.
+    let known = *work.0.lock().unwrap();
+    let area = match known {
+        Some(area) => area,
+        None => match ax::main_display() {
+            Some(screen) => mwm_core::layout::work_area(screen.bounds),
+            None => return Some("place: no main display".to_string()),
+        },
     };
     let order: Vec<u64> = if ids.is_empty() {
         // Та же подпись и та же сортировка, что рисуют меню, — потому порядок
@@ -720,7 +744,7 @@ fn arrange(
     let mut last = String::new();
     for (window_id, want) in order
         .iter()
-        .zip(mwm_core::layout::arrange(mode, screen.bounds, order.len()))
+        .zip(mwm_core::layout::arrange(mode, area, order.len()))
     {
         if let Err(e) = ax::place(registry, *window_id, want) {
             eprintln!("mwm: place failed: {e}");
@@ -959,11 +983,25 @@ fn main() {
             let asking = Asking(Arc::new(Mutex::new(to_requests.clone())));
             app.manage(asking);
 
+            // Рабочая область: пустая до первого захода рисовальщика на главный
+            // поток. Пустоту трекер переживает — считает по запасной, — а вот
+            // спросить `NSScreen` из своего потока не может вовсе.
+            let work = Work(Arc::new(Mutex::new(None)));
+
             let worker = status.clone();
             let worker_trusted = trusted.clone();
             let worker_windows = windows.clone();
+            let worker_work = work.clone();
             std::thread::spawn(move || {
-                run_tracker(worker, worker_trusted, shared, worker_windows, requests, to_requests)
+                run_tracker(
+                    worker,
+                    worker_trusted,
+                    shared,
+                    worker_windows,
+                    requests,
+                    to_requests,
+                    worker_work,
+                )
             });
 
             // Строка состояния обновляется своим тиком: лезть в меню из потока
@@ -1005,7 +1043,13 @@ fn main() {
                     let app = handle_for_items.clone();
                     let tile = tile.clone();
                     let cascade = cascade.clone();
+                    let work = work.clone();
                     move || {
+                        // Первым делом, до всякой работы с меню: раскладка без
+                        // рабочей области считает по запасной, где Dock не
+                        // вычтен, и лишний такт такого счёта — это окна под
+                        // Dock у того, кто нажал сразу после запуска.
+                        *work.0.lock().unwrap() = ax::main_work_area();
                         let _ = state.set_text(&text);
                         match toggle {
                             // Пункт «выдать разрешение» приходит ровно тогда,
@@ -1312,7 +1356,7 @@ mod tests {
             "просьба из меню — та же, что приезжает по MQTT"
         );
         assert_eq!(
-            src.matches("Request::Arrange { mode, ids } => arrange(").count(),
+            src.matches("Request::Arrange { mode, ids } =>").count(),
             1,
             "исполняет раскладку одна ветка"
         );

@@ -377,6 +377,31 @@ mod imp {
     /// display in the global display coordinate space»), уже отдаёт
     /// координаты в той же системе, что и Accessibility — переворачивать `y`
     /// самим не нужно.
+    /// Рабочая область главного экрана: без полосы меню и без Dock.
+    ///
+    /// **Только с главного потока.** `NSScreen` — API AppKit, и `MainThreadMarker`
+    /// это требование проверяет: не на главном потоке ответ будет `None`, а не
+    /// неверные числа. Поэтому область и не спрашивается там, где расставляются
+    /// окна: тот поток свой, а сюда ответ приезжает ячейкой.
+    ///
+    /// Числа переворачиваются: `NSScreen` считает от левого нижнего угла и вверх,
+    /// Accessibility — от левого верхнего и вниз. Высота полного кадра — это то,
+    /// от чего отсчитывается переворот; у главного экрана его начало в нуле, и
+    /// потому переворачивается только `y`.
+    pub fn main_work_area() -> Option<Bounds> {
+        let mtm = objc2::MainThreadMarker::new()?;
+        let screen = objc2_app_kit::NSScreen::mainScreen(mtm)?;
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+        let bounds = Bounds {
+            x: visible.origin.x as i32,
+            y: (frame.size.height - (visible.origin.y + visible.size.height)) as i32,
+            width: visible.size.width as i32,
+            height: visible.size.height as i32,
+        };
+        (bounds.width > 0 && bounds.height > 0).then_some(bounds)
+    }
+
     /// Главный экран — тот, на котором полоса меню.
     ///
     /// Раскладка спрашивает именно его, а не первый из списка: порядок
@@ -440,9 +465,10 @@ mod imp {
     }
     pub fn displays() -> Vec<Display> { Vec::new() }
     pub fn main_display() -> Option<Display> { None }
+    pub fn main_work_area() -> Option<Bounds> { None }
 }
 
 pub use imp::{
-    activate_self, displays, list_windows, main_display, place, prompt_for_trust, raise, trusted,
-    Registry,
+    activate_self, displays, list_windows, main_display, main_work_area, place, prompt_for_trust,
+    raise, trusted, Registry,
 };
