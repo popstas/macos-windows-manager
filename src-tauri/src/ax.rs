@@ -159,6 +159,10 @@ mod imp {
                 // Геометрия спрашивается до перемещения `w` в `alive` — после
                 // него ссылки уже нет.
                 let bounds = bounds_of(&w);
+                // Свёрнутость спрашивается здесь же, до переезда `w` в
+                // `alive`, и по той же причине, что и геометрия: после него
+                // ссылки на окно уже нет.
+                let minimized = minimized_of(&w);
                 alive.push(w);
                 // Сессия, названная в точности как терминал, признак получит
                 // зря — но цена этому невелика: такт замирает, только когда
@@ -170,7 +174,15 @@ mod imp {
                 // неотличимы — пометка «окно есть» у них одна). Клонируется
                 // на каждое окно приложения: строка одна на приложение, а
                 // записей у него несколько.
-                out.push(Seen { id, focused, title, bounds, nameless, app: app_name.clone() });
+                out.push(Seen {
+                    id,
+                    focused,
+                    title,
+                    bounds,
+                    nameless,
+                    minimized,
+                    app: app_name.clone(),
+                });
             }
         }
         reg.retain_seen(&alive);
@@ -184,6 +196,14 @@ mod imp {
             Ok(arr) => arr.iter().map(|w| w.clone()).collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Свёрнуто ли окно в Dock. Отказ — `false`, а не ошибка и не «свёрнуто»:
+    /// «платформа не ответила» обязано значить «обычное окно», иначе сбой
+    /// Accessibility на одном такте выкинул бы из раскладки все окна разом —
+    /// и человек увидел бы не отказ, а молча не сработавшую плитку.
+    fn minimized_of(w: &AXUIElement) -> bool {
+        w.attribute(&AXAttribute::minimized()).map(bool::from).unwrap_or(false)
     }
 
     fn title_of(w: &AXUIElement) -> Option<String> {

@@ -66,6 +66,12 @@ pub fn build_file(
                 // списке `net.kovidgoyal.kitty` нечем. Пустая строка вместо
                 // пропуска — то же правило, что у нулей рядом.
                 "app": b.app,
+                // Свёрнуто ли окно. Читатель гасит по нему строку и не зовёт
+                // её в раскладку: сам он этого знать не может — окна видит
+                // только трекер. `false` вместо пропуска — то же правило, что
+                // у нулей и пустых строк рядом: читателю дешевле лишний ключ,
+                // чем проверка на его отсутствие при каждом использовании.
+                "minimized": b.minimized,
             }),
         );
     }
@@ -123,6 +129,11 @@ pub fn build_file(
 /// новом окне другого терминала, заголовок при этом тот же, — и без этой
 /// строки читатель до получаса видел бы букву прежнего.
 ///
+/// Свёрнутость входит в отпечаток по той же причине, что и `can_focus`: без
+/// неё свёрнутое окно доехало бы до пикера только со следующим сердцебиением
+/// — до полуминуты спустя, — и человек увидел бы гашение строки не тогда,
+/// когда свернул окно, а когда-нибудь потом.
+///
 /// `can_focus` подмешан отдельным байтом, а не как часть цикла по сессиям:
 /// поле `focus` в файле — про машину целиком, не про конкретную сессию, и
 /// значение не должно путаться с содержимым чьего-то заголовка. Без него
@@ -141,6 +152,8 @@ pub fn fingerprint(bound: &BTreeMap<String, Bound>, can_focus: bool) -> String {
         out.push_str(&b.app);
         out.push('\u{1}');
         out.push_str(&b.focused_at_ms.to_string());
+        out.push('\u{1}');
+        out.push(if b.minimized { '\u{5}' } else { '\u{6}' });
         out.push('\u{2}');
     }
     out
@@ -178,7 +191,14 @@ mod tests {
             last_seen_ms,
             focused_at_ms: 9_000,
             app: "kitty".to_string(),
+            minimized: false,
         });
+        m
+    }
+
+    fn bound_minimized(title: &str, last_seen_ms: u64) -> BTreeMap<String, Bound> {
+        let mut m = bound(title, last_seen_ms);
+        m.get_mut(SID).unwrap().minimized = true;
         m
     }
 
@@ -317,6 +337,29 @@ mod tests {
         assert_ne!(
             fingerprint(&bound("ccfzf", 1_000), true),
             fingerprint(&bound("other", 1_000), true),
+        );
+    }
+
+    #[test]
+    fn a_window_says_whether_it_is_minimized() {
+        // Пикер по этому полю гасит строку и не зовёт её в раскладку, а сам
+        // знать этого не может: окна видит только трекер.
+        let open = build_file(&bound("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
+        assert_eq!(open["windows"][SID]["minimized"], false);
+        let hidden =
+            build_file(&bound_minimized("ccfzf", 60_000), "mac-host", 7, 60_000, true, "", &[]);
+        assert_eq!(hidden["windows"][SID]["minimized"], true);
+    }
+
+    #[test]
+    fn fingerprint_notices_a_minimize() {
+        // Расклад окон тот же, сменилась только свёрнутость. Не различи её
+        // отпечаток — `should_write` отложила бы запись до `HEARTBEAT_MS`, и
+        // строка в пикере гасла бы не тогда, когда человек свернул окно, а до
+        // получаса спустя.
+        assert_ne!(
+            fingerprint(&bound("ccfzf", 1_000), true),
+            fingerprint(&bound_minimized("ccfzf", 1_000), true),
         );
     }
 

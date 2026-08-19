@@ -23,6 +23,11 @@ pub struct Seen {
     /// читателя: кто такой «kitty», знает платформенный слой, который и
     /// перечисляет приложения, а трекеру достаётся уже готовый ответ.
     pub nameless: bool,
+    /// Окно свёрнуто в Dock. Признак нужен раскладке: свёрнутое окно
+    /// раскладывать некуда — оно не на экране, а клетку сетки заняло бы, и
+    /// соседи ужались бы ради пустого места. Привязку признак не трогает:
+    /// сессия за свёрнутым окном жива, и читатель обязан её видеть.
+    pub minimized: bool,
     /// Как зовут приложение окна — отображаемым именем (`kitty`, `iTerm2`), а
     /// не идентификатором пакета: читатель различает по нему терминалы в
     /// строке поимённо, и таблица имён лежит у него. Идентификатор пакета
@@ -42,6 +47,11 @@ pub struct Bound {
     /// с окна текущего такта, а не из слота: слот переживает закрытие окна и
     /// назвал бы терминал у сессии, которой на экране нет.
     pub app: String,
+    /// Свёрнуто ли окно сессии — то же, что в `Seen`, и берётся с окна
+    /// текущего такта по той же причине, что и терминал. Уезжает читателю:
+    /// пикер по нему гасит строку и не зовёт её в раскладку, а решить это сам
+    /// он не может — окна видит только трекер.
+    pub minimized: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -300,6 +310,7 @@ impl Tracker {
                     last_seen_ms: now_ms,
                     focused_at_ms: slot.focused_at_ms,
                     app: w.app.clone(),
+                    minimized: w.minimized,
                 },
             );
         }
@@ -417,18 +428,23 @@ mod tests {
     }
 
     fn seen(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, minimized: false, app: "kitty".to_string() }
     }
 
     fn seen_at(id: u64, title: &str, b: Bounds) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: Some(b), nameless: false, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: Some(b), nameless: false, minimized: false, app: "kitty".to_string() }
     }
 
     /// Окно, про которое платформа сказала лишь имя приложения. Номер берётся
     /// новый намеренно: на живой машине после гашения экрана окна приезжают
     /// новыми элементами, и прежние номера вместе с привязкой теряются.
     fn nameless(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true, minimized: false, app: "kitty".to_string() }
+    }
+
+    /// Свёрнутое окно, привязанное к сессии.
+    fn seen_minimized(id: u64, title: &str) -> Seen {
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, minimized: true, app: "kitty".to_string() }
     }
 
     fn rect(x: i32, y: i32) -> Bounds {
@@ -460,6 +476,23 @@ mod tests {
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 3_000);
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 4_000);
         assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID], "окно осталось за сессией");
+    }
+
+    /// Свёрнутость доезжает до привязки: читателю её больше взять неоткуда —
+    /// окна видит только трекер, а решает по ней пикер.
+    #[test]
+    fn a_minimized_window_says_so_in_its_binding() {
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
+        t.tick(&[seen(1, "ccfzf")], &idx, 2_000);
+        assert!(!t.bound()[SID].minimized, "открытое окно свёрнутым не считается");
+        t.tick(&[seen_minimized(1, "ccfzf")], &idx, 3_000);
+        assert!(t.bound()[SID].minimized, "свёрнутое окно объявляет себя свёрнутым");
+        // И обратно: развёрнутое окно перестаёт им быть тем же тактом, иначе
+        // строка в пикере осталась бы гашёной до перезапуска трекера.
+        t.tick(&[seen(1, "ccfzf")], &idx, 4_000);
+        assert!(!t.bound()[SID].minimized, "развёрнутое окно снимает признак");
     }
 
     #[test]
@@ -579,7 +612,7 @@ mod tests {
         let idx = index(&[("ccfzf", SID)]);
         t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.tick(&[seen(1, "ccfzf")], &idx, 9_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000, "отметка не откатывается");
@@ -637,7 +670,7 @@ mod tests {
         // свежее и побеждает по максимуму. Отматывать надо ту, что перебивает.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.mark_unread(SID);
         assert_eq!(t.bound()[SID].focused_at_ms, 0, "отметка отмотана сразу, а не к следующему такту");
@@ -649,7 +682,7 @@ mod tests {
         // прежнее значение, и отмотка выглядела бы сработавшей ровно на секунду.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         t.mark_unread(SID);
         t.tick(&[seen(1, "ccfzf")], &idx, 6_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
@@ -662,9 +695,9 @@ mod tests {
         // запретом.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         t.mark_unread(SID);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 7_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 7_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 7_000);
     }
 

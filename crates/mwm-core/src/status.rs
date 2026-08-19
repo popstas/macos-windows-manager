@@ -19,6 +19,27 @@ pub fn status_line(base: &str, notes: &[&str]) -> String {
     out
 }
 
+/// Чем занят трекер в обычном такте: сколько окон ведётся и сколько из них
+/// свёрнуто.
+///
+/// Свёрнутые считаются среди ведомых, а не среди всех виденных: пункты меню
+/// ниже строки — это ведомые окна, и число, посчитанное по другому множеству,
+/// говорило бы не про тот список, который человек под ним видит.
+///
+/// Ноль свёрнутых опускается вместе с запятой — по тому же правилу, что и
+/// пустая заметка в `status_line`: «свёрнутых нет» и «сказать про ноль» разные
+/// вещи, а вторая приписывала бы к строке хвост, который висел бы там всегда.
+/// Хвост не зависит от того, включён ли пропуск свёрнутых: человек, увидевший
+/// в плитке на одно окно меньше, спрашивает «где оно», и ответ обязан стоять в
+/// строке до того, как он полезет в настройки.
+pub fn tracked_line(tracked: usize, minimized: usize) -> String {
+    if minimized == 0 {
+        format!("{tracked} windows tracked")
+    } else {
+        format!("{tracked} windows tracked, {minimized} minimized")
+    }
+}
+
 /// Подпись неактивного пункта меню: какая сборка сейчас запущена.
 ///
 /// Нужна затем, что `deploy-mac.sh` обновляет бинарь на месте, а версия у всех
@@ -95,6 +116,24 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime {
         day(y, m, d).and_hms_opt(h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn a_tick_without_minimized_windows_says_nothing_about_them() {
+        assert_eq!(tracked_line(3, 0), "3 windows tracked");
+    }
+
+    #[test]
+    fn minimized_windows_are_counted_after_the_tracked_ones() {
+        assert_eq!(tracked_line(3, 1), "3 windows tracked, 1 minimized");
+    }
+
+    /// Свёрнуты все — строка всё равно называет оба числа: «3 windows tracked»
+    /// с пропавшей плиткой выглядело бы поломкой раскладки, а не свёрнутыми
+    /// окнами.
+    #[test]
+    fn all_windows_minimized_still_names_both_numbers() {
+        assert_eq!(tracked_line(3, 3), "3 windows tracked, 3 minimized");
     }
 
     #[test]
