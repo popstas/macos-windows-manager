@@ -47,6 +47,11 @@ pub struct Bound {
     /// с окна текущего такта, а не из слота: слот переживает закрытие окна и
     /// назвал бы терминал у сессии, которой на экране нет.
     pub app: String,
+    /// Свёрнуто ли окно сессии — то же, что в `Seen`, и берётся с окна
+    /// текущего такта по той же причине, что и терминал. Уезжает читателю:
+    /// пикер по нему гасит строку и не зовёт её в раскладку, а решить это сам
+    /// он не может — окна видит только трекер.
+    pub minimized: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -305,6 +310,7 @@ impl Tracker {
                     last_seen_ms: now_ms,
                     focused_at_ms: slot.focused_at_ms,
                     app: w.app.clone(),
+                    minimized: w.minimized,
                 },
             );
         }
@@ -436,6 +442,11 @@ mod tests {
         Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true, minimized: false, app: "kitty".to_string() }
     }
 
+    /// Свёрнутое окно, привязанное к сессии.
+    fn seen_minimized(id: u64, title: &str) -> Seen {
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, minimized: true, app: "kitty".to_string() }
+    }
+
     fn rect(x: i32, y: i32) -> Bounds {
         Bounds { x, y, width: 800, height: 600 }
     }
@@ -465,6 +476,23 @@ mod tests {
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 3_000);
         t.tick(&[seen(1, "writing the plan")], &BTreeMap::new(), 4_000);
         assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID], "окно осталось за сессией");
+    }
+
+    /// Свёрнутость доезжает до привязки: читателю её больше взять неоткуда —
+    /// окна видит только трекер, а решает по ней пикер.
+    #[test]
+    fn a_minimized_window_says_so_in_its_binding() {
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
+        t.tick(&[seen(1, "ccfzf")], &idx, 2_000);
+        assert!(!t.bound()[SID].minimized, "открытое окно свёрнутым не считается");
+        t.tick(&[seen_minimized(1, "ccfzf")], &idx, 3_000);
+        assert!(t.bound()[SID].minimized, "свёрнутое окно объявляет себя свёрнутым");
+        // И обратно: развёрнутое окно перестаёт им быть тем же тактом, иначе
+        // строка в пикере осталась бы гашёной до перезапуска трекера.
+        t.tick(&[seen(1, "ccfzf")], &idx, 4_000);
+        assert!(!t.bound()[SID].minimized, "развёрнутое окно снимает признак");
     }
 
     #[test]
