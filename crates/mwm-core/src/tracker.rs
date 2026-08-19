@@ -23,6 +23,11 @@ pub struct Seen {
     /// читателя: кто такой «kitty», знает платформенный слой, который и
     /// перечисляет приложения, а трекеру достаётся уже готовый ответ.
     pub nameless: bool,
+    /// Окно свёрнуто в Dock. Признак нужен раскладке: свёрнутое окно
+    /// раскладывать некуда — оно не на экране, а клетку сетки заняло бы, и
+    /// соседи ужались бы ради пустого места. Привязку признак не трогает:
+    /// сессия за свёрнутым окном жива, и читатель обязан её видеть.
+    pub minimized: bool,
     /// Как зовут приложение окна — отображаемым именем (`kitty`, `iTerm2`), а
     /// не идентификатором пакета: читатель различает по нему терминалы в
     /// строке поимённо, и таблица имён лежит у него. Идентификатор пакета
@@ -417,18 +422,18 @@ mod tests {
     }
 
     fn seen(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: false, minimized: false, app: "kitty".to_string() }
     }
 
     fn seen_at(id: u64, title: &str, b: Bounds) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: Some(b), nameless: false, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: Some(b), nameless: false, minimized: false, app: "kitty".to_string() }
     }
 
     /// Окно, про которое платформа сказала лишь имя приложения. Номер берётся
     /// новый намеренно: на живой машине после гашения экрана окна приезжают
     /// новыми элементами, и прежние номера вместе с привязкой теряются.
     fn nameless(id: u64, title: &str) -> Seen {
-        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true, app: "kitty".to_string() }
+        Seen { id, title: title.to_string(), focused: false, bounds: None, nameless: true, minimized: false, app: "kitty".to_string() }
     }
 
     fn rect(x: i32, y: i32) -> Bounds {
@@ -579,7 +584,7 @@ mod tests {
         let idx = index(&[("ccfzf", SID)]);
         t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.tick(&[seen(1, "ccfzf")], &idx, 9_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000, "отметка не откатывается");
@@ -637,7 +642,7 @@ mod tests {
         // свежее и побеждает по максимуму. Отматывать надо ту, что перебивает.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 5_000);
         t.mark_unread(SID);
         assert_eq!(t.bound()[SID].focused_at_ms, 0, "отметка отмотана сразу, а не к следующему такту");
@@ -649,7 +654,7 @@ mod tests {
         // прежнее значение, и отмотка выглядела бы сработавшей ровно на секунду.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         t.mark_unread(SID);
         t.tick(&[seen(1, "ccfzf")], &idx, 6_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 0);
@@ -662,9 +667,9 @@ mod tests {
         // запретом.
         let mut t = Tracker::new(1);
         let idx = index(&[("ccfzf", SID)]);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 5_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 5_000);
         t.mark_unread(SID);
-        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, app: "kitty".into() }], &idx, 7_000);
+        t.tick(&[Seen { id: 1, title: "ccfzf".into(), focused: true, bounds: None, nameless: false, minimized: false, app: "kitty".into() }], &idx, 7_000);
         assert_eq!(t.bound()[SID].focused_at_ms, 7_000);
     }
 

@@ -33,8 +33,8 @@ terminals:
 # hand works the same way, and takes effect on the next tick — the tracker
 # rereads them as it goes.
 #
-# The first three concern terminal windows only, the ones listed in `terminals`
-# above.
+# All but `localSource` concern terminal windows only, the ones listed in
+# `terminals` above.
 # features:
 #   # Put an appearing window back where its session had it last time.
 #   # Switched off, remembered places keep being recorded, so switching it back
@@ -57,6 +57,17 @@ terminals:
 #   # session is unknown. Costs nothing on a machine with no aggregator of its
 #   # own — the local list is simply absent.
 #   localSource: true
+#   # Give a minimized window a cell in Tile and Cascade.
+#   #
+#   # Switched off, minimized windows are skipped and the rest share the whole
+#   # screen: a minimized window is not on screen, and a cell held for it would
+#   # squeeze its neighbours for nothing. The tray line says how many were left
+#   # out — `3 windows tracked, 1 minimized`.
+#   #
+#   # Layout only. The session keeps its item in the tray menu, its place is
+#   # still remembered, and the picker sees it as before. The same switch sits
+#   # in the tray menu worded the other way round: "Ignore minimized windows".
+#   showMinimized: true
 
 # Broker through which requests to raise a window and to mark a session unread
 # arrive. Without this block the tracker works as before — it lists windows and

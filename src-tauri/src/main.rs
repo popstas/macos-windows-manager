@@ -17,7 +17,7 @@ use mwm_core::tracker::Tracker;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 // Ради `app.manage`: ячейка настроек кладётся в состояние приложения, оттуда
 // её берут команды окна.
 use tauri::Manager;
@@ -94,7 +94,11 @@ type Drawn = Arc<Mutex<(Vec<String>, Vec<MenuItem<tauri::Wry>>)>>;
 /// Список окон вставляется по номеру, и номер этот считается от места, где
 /// кончились пункты с постоянным местом. Забудь про них счёт — список встал бы
 /// поверх кнопок.
-const LAYOUT_ITEMS: usize = 2;
+///
+/// Три: плитка, каскад и галочка «не раскладывать свёрнутые». Галочка стоит
+/// среди них, а не ниже списка окон, потому что она про раскладку: настройка,
+/// уехавшая под окна, читалась бы как настройка списка.
+const LAYOUT_ITEMS: usize = 3;
 
 /// Куда возвращать пункт «выдать разрешение», когда разрешение пропало.
 ///
@@ -260,6 +264,11 @@ fn run_tracker(
     // рассказывает про сессии. Держим рядом, потому что `Registry` знает
     // номера, а не сессии, и связать их может только тот, кто видел оба списка.
     let mut window_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    // Номера свёрнутых окон на прошлом такте. Рядом с `window_of` и той же
+    // свежести: просьба о раскладке приходит между тактами, и оба списка она
+    // видит одинаково устаревшими — разойдись они, раскладка пропускала бы
+    // окно по одному такту, а считала бы его по другому.
+    let mut minimized: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut last_print: Option<String> = None;
     // Прошлая жалоба на непривязанные окна — чтобы не повторять её каждый такт.
     // Хранится сама строка, а не отметка времени: повод сказать снова — другая
@@ -301,7 +310,13 @@ fn run_tracker(
                     if !features.requests {
                         continue;
                     }
-                    let note = serve(&req, &mut tracker, &registry, &window_of, &work);
+                    // `None` значит «раскладывать всё»: список свёрнутых
+                    // нужен раскладке, только когда их велено пропускать, и
+                    // пустой список вместо признака заставил бы каждую
+                    // просьбу выяснять, что именно значит «никого не
+                    // пропускаем».
+                    let skip = (!features.show_minimized).then_some(&minimized);
+                    let note = serve(&req, &mut tracker, &registry, &window_of, skip, &work);
                     if let Some(note) = note {
                         mwm_log!("{note}");
                         *status.0.lock().unwrap() = note;
@@ -399,6 +414,14 @@ fn run_tracker(
                 window_of.insert(sid.clone(), w.id);
             }
         }
+        minimized.clear();
+        minimized.extend(seen.iter().filter(|w| w.minimized).map(|w| w.id));
+        // Считаются свёрнутые среди ведомых, а не среди всех виденных: под
+        // строкой состояния стоят пункты ведомых окон, и число, посчитанное по
+        // другому множеству, говорило бы не про тот список, который человек
+        // под ним видит.
+        let minimized_tracked =
+            window_of.values().filter(|id| minimized.contains(id)).count();
         // Окна, которые видно, но которые никому не достались. Правило
         // совпадения то же, что у `window_of` строкой выше, и это не совпадение:
         // «окно не нашло своей сессии» обязано значить ровно обратное тому, что
@@ -592,7 +615,7 @@ fn run_tracker(
                 Ok(()) => {
                     last_print = Some(print);
                     last_write_ms = now;
-                    let base = format!("{} windows tracked", bound.len());
+                    let base = mwm_core::status::tracked_line(bound.len(), minimized_tracked);
                     *status.0.lock().unwrap() = mwm_core::status::status_line(&base, &notes);
                 }
                 // Ничего не копится: следующая посылка везёт текущее состояние
@@ -610,7 +633,7 @@ fn run_tracker(
             // расстановки и ошибка чтения дампа не должны ждать следующей
             // записи файла, до неё может быть далеко (или не наступить вовсе,
             // пока отпечаток не сдвинется).
-            let base = format!("{} windows tracked", bound.len());
+            let base = mwm_core::status::tracked_line(bound.len(), minimized_tracked);
             *status.0.lock().unwrap() = mwm_core::status::status_line(
                 &base,
                 &[place_note.as_str(), fetch_note.as_str(), local_fetch_note.as_str()],
@@ -705,6 +728,7 @@ fn serve(
     tracker: &mut Tracker,
     registry: &ax::Registry,
     window_of: &std::collections::HashMap<String, u64>,
+    skip: Option<&std::collections::HashSet<u64>>,
     work: &Work,
 ) -> Option<String> {
     use mwm_core::request::Request;
@@ -723,7 +747,7 @@ fn serve(
             None
         }
         Request::Arrange { mode, ids } => {
-            arrange(*mode, ids, tracker, registry, window_of, work)
+            arrange(*mode, ids, tracker, registry, window_of, skip, work)
         }
     }
 }
@@ -739,6 +763,8 @@ fn arrange(
     tracker: &Tracker,
     registry: &ax::Registry,
     window_of: &std::collections::HashMap<String, u64>,
+    // Номера окон, которым в раскладке не место. `None` — раскладывать всё.
+    skip: Option<&std::collections::HashSet<u64>>,
     work: &Work,
 ) -> Option<String> {
     // Настоящая рабочая область приезжает с главного потока и знает про Dock с
@@ -773,6 +799,18 @@ fn arrange(
         // окно могли закрыть между опросом и нажатием. Отказать всей раскладке
         // из-за одной закрытой сессии — значит не разложить ничего.
         ids.iter().filter_map(|id| window_of.get(id).copied()).collect()
+    };
+    // Свёрнутые вычёркиваются после сбора порядка, а не при сборе: порядок
+    // приезжает и списком `ids` из пикера, и подписями меню, и вычёркивать
+    // пришлось бы в двух местах — разойдись они, просьба с той стороны
+    // раскладывала бы то, чего пункт меню не раскладывает.
+    //
+    // Разложить свёрнутое нечем — на экране его нет, — а клетку сетки оно
+    // заняло бы, и соседи ужались бы ради пустого места. Сетка считается уже
+    // по остатку: `order.len()` ниже берётся после вычёркивания.
+    let order: Vec<u64> = match skip {
+        Some(skip) => order.into_iter().filter(|id| !skip.contains(id)).collect(),
+        None => order,
     };
     if order.is_empty() {
         return Some("place: no windows to place".to_string());
@@ -1052,15 +1090,42 @@ fn main() {
                 trusted_now,
                 None::<&str>,
             )?;
+            // Галочка, а не пункт-действие: она показывает настройку, а не
+            // делает что-то однократно. Отмечена, когда свёрнутые из раскладки
+            // убраны, — подпись говорит про то, что произойдёт, а ключ конфига
+            // (`showMinimized`) назван от обратного, потому что все флаги в
+            // `features:` включены по умолчанию, и «выключить» там значит
+            // «убрать поведение».
+            //
+            // Активна и без Accessibility, в отличие от пунктов раскладки: это
+            // настройка, а не действие над окнами, и записать её в конфиг
+            // разрешение не нужно.
+            let ignore_minimized = CheckMenuItem::with_id(
+                app,
+                "ignore-minimized",
+                "Ignore minimized windows",
+                true,
+                !config.features.show_minimized,
+                None::<&str>,
+            )?;
             // `Settings…` встаёт над `Quit`, и `GRANT_POSITION` от этого не
             // меняется: приходящий и уходящий пункт по-прежнему второй сверху.
             // Пункты раскладки встают под `GRANT_POSITION`, а список окон —
             // под ними: у кнопки место постоянное, а список растёт и тает от
             // числа окон, и кнопка уезжала бы у человека из-под курсора.
             let menu = if trusted_now {
-                Menu::with_items(app, &[&state, &tile, &cascade, &settings, &quit, &version])?
+                Menu::with_items(
+                    app,
+                    &[&state, &tile, &cascade, &ignore_minimized, &settings, &quit, &version],
+                )?
             } else {
-                Menu::with_items(app, &[&state, &grant, &tile, &cascade, &settings, &quit, &version])?
+                Menu::with_items(
+                    app,
+                    &[
+                        &state, &grant, &tile, &cascade, &ignore_minimized, &settings, &quit,
+                        &version,
+                    ],
+                )?
             };
             // Значок трея заводится только здесь. Объявление `app.trayIcon` в
             // `tauri.conf.json` завело бы второй — Tauri создаёт его сам при
@@ -1086,6 +1151,27 @@ fn main() {
                             }
                         });
                     }
+                    // Галочка пишет конфиг, а не свою ячейку в памяти: трекер
+                    // перечитывает настройки каждый оборот, и переживший
+                    // перезапуск ответ — это ровно то, чего человек ждёт от
+                    // галочки, а не от нажатия. Дорога та же, что у окна
+                    // настроек (`save_settings`), и по той же причине: два
+                    // способа записать один ключ разошлись бы на первой правке.
+                    //
+                    // Отметку галочки здесь не трогаем — её ставит рисовальщик
+                    // по конфигу через две секунды. Поставь её обработчик сам,
+                    // отказ записи оставил бы в меню галочку, которой в файле
+                    // нет.
+                    "ignore-minimized" => {
+                        let shared = app.state::<Shared>();
+                        let show = shared.get().features.show_minimized;
+                        let patch =
+                            serde_json::json!({"features": {"showMinimized": !show}});
+                        match write_config(&config_file_path(), &patch) {
+                            Ok(()) => *shared.0.lock().unwrap() = load_config(),
+                            Err(e) => mwm_log!("ignore minimized: {e}"),
+                        }
+                    }
                     "tile" => ask(app, mwm_core::layout::Layout::Tile),
                     "cascade" => ask(app, mwm_core::layout::Layout::Cascade),
                     "quit" => app.exit(0),
@@ -1105,6 +1191,11 @@ fn main() {
             // поток. Пустоту трекер переживает — считает по запасной, — а вот
             // спросить `NSScreen` из своего потока не может вовсе.
             let work = Work(Arc::new(Mutex::new(None)));
+
+            // Рисовальщику меню настройки нужны затем же, зачем строка
+            // состояния: галочка обязана показывать то, что в файле, — а файл
+            // правят и руками, и окном настроек, не только ею самой.
+            let shared_for_painter = shared.clone();
 
             let worker = status.clone();
             let worker_trusted = trusted.clone();
@@ -1153,6 +1244,10 @@ fn main() {
                 let want_grant = !trusted.0.load(Ordering::Relaxed);
                 let toggle = (want_grant != grant_shown).then_some(want_grant);
                 grant_shown = want_grant;
+                // Читается каждый такт, а не запоминается при старте: ключ
+                // правят и руками в `config.yaml`, и окном настроек, и меню
+                // обязано показывать файл, а не своё прошлое нажатие.
+                let show_minimized = shared_for_painter.get().features.show_minimized;
                 let _ = handle.run_on_main_thread({
                     let state = state.clone();
                     let grant = grant.clone();
@@ -1161,6 +1256,7 @@ fn main() {
                     let app = handle_for_items.clone();
                     let tile = tile.clone();
                     let cascade = cascade.clone();
+                    let ignore_minimized = ignore_minimized.clone();
                     let work = work.clone();
                     move || {
                         // Первым делом, до всякой работы с меню: раскладка без
@@ -1169,6 +1265,7 @@ fn main() {
                         // Dock у того, кто нажал сразу после запуска.
                         *work.0.lock().unwrap() = ax::main_work_area();
                         let _ = state.set_text(&text);
+                        let _ = ignore_minimized.set_checked(!show_minimized);
                         match toggle {
                             // Пункт «выдать разрешение» приходит ровно тогда,
                             // когда раскладка перестаёт работать: двигать окна
@@ -1379,7 +1476,7 @@ mod tests {
         // ровно на этот случай.
         let page = include_str!("../../frontend/settings.html");
         for key in [
-            "placement", "snapshots", "requests", "localSource",
+            "placement", "snapshots", "requests", "localSource", "showMinimized",
             "sshHost", "remoteDir", "windowHost",
             "terminals", "tickMs", "dumpCacheMs",
             "host", "port", "user", "password", "base",
@@ -1520,12 +1617,12 @@ mod tests {
             "список окон вставляется под пунктами раскладки"
         );
         assert_eq!(
-            src.matches("&tile, &cascade,").count(),
+            src.matches("&tile, &cascade, &ignore_minimized,").count(),
             2,
-            "оба пункта стоят в обеих сборках меню — с разрешением и без"
+            "все три пункта стоят в обеих сборках меню — с разрешением и без"
         );
         assert_eq!(
-            super::LAYOUT_ITEMS, 2,
+            super::LAYOUT_ITEMS, 3,
             "счёт пунктов раскладки совпадает с их числом в меню"
         );
     }
@@ -1600,6 +1697,68 @@ mod tests {
             let off = width + HAIR * f64::from(pad) - WIDEST;
             assert!(off.abs() <= 0.5, "{name}: подпись съезжает на {off:.2} pt");
         }
+    }
+
+    #[test]
+    fn minimized_windows_leave_the_layout_when_the_flag_is_off() {
+        // Соль в том, что вычёркивание стоит после сбора порядка: собери его
+        // просьба с `ids` из пикера — фильтр обязан сработать и там, иначе
+        // клавиша раскладывала бы не то, что раскладывает пункт меню.
+        let src = tracker_source();
+        assert!(
+            src.contains("Some(skip) => order.into_iter().filter(|id| !skip.contains(id))"),
+            "свёрнутые обязаны выпадать из порядка раскладки"
+        );
+        assert!(
+            src.contains("let skip = (!features.show_minimized).then_some(&minimized);"),
+            "фильтр обязан слушаться флага, а не быть безусловным"
+        );
+        // Сетка считается по остатку: `arrange` берёт `order.len()` уже после
+        // вычёркивания, иначе свёрнутое окно держало бы пустую клетку.
+        let cut = src.split("let order: Vec<u64> = match skip").nth(1).unwrap();
+        assert!(
+            cut.contains("mwm_core::layout::arrange(mode, area, order.len())"),
+            "число клеток обязано считаться после вычёркивания свёрнутых"
+        );
+    }
+
+    #[test]
+    fn the_tray_counts_minimized_windows_among_the_tracked_ones() {
+        // Число в строке обязано говорить про тот же список, что стоит
+        // пунктами под ней: посчитанное по всем виденным окнам, оно называло
+        // бы свёрнутыми окна, которых в списке нет вовсе.
+        let src = tracker_source();
+        assert!(
+            src.contains("window_of.values().filter(|id| minimized.contains(id)).count()"),
+            "свёрнутые считаются среди ведомых окон"
+        );
+        assert!(
+            src.contains("mwm_core::status::tracked_line(bound.len(), minimized_tracked)"),
+            "строка трея обязана собираться одной функцией, а не форматом по месту"
+        );
+    }
+
+    #[test]
+    fn the_tray_menu_carries_the_minimized_switch() {
+        // Галочка стоит среди пунктов раскладки, и `LAYOUT_ITEMS` считает её
+        // вместе с ними: разойдись счёт — список окон встал бы поверх неё.
+        let src = tracker_source();
+        assert!(
+            src.contains("\"ignore-minimized\""),
+            "галочка «не раскладывать свёрнутые» пропала из меню"
+        );
+        // Нажатие пишет конфиг той же дорогой, что и окно настроек: иначе
+        // ключ уехал бы в файл в двух разных видах.
+        assert!(
+            src.contains("serde_json::json!({\"features\": {\"showMinimized\": !show}})"),
+            "галочка обязана писать тот же ключ, который читает parse_config"
+        );
+        // Отметка ставится рисовальщиком по конфигу, а не обработчиком по
+        // своему прошлому нажатию: файл правят и руками.
+        assert!(
+            src.contains("ignore_minimized.set_checked(!show_minimized)"),
+            "галочка обязана сверяться с конфигом каждый такт рисовальщика"
+        );
     }
 
     #[test]

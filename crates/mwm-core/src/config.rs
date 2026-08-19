@@ -49,11 +49,27 @@ pub struct Features {
     /// Умолчание `true` ничего не стоит машине без местного агрегатора: дампа
     /// там нет, значит и индекс пуст, а лишний файл окон читать некому.
     pub local_source: bool,
+    /// Раскладывать ли свёрнутые окна.
+    ///
+    /// Выключенный убирает свёрнутое окно из плитки и каскада — и только
+    /// оттуда: сессия за ним жива, пункт меню остаётся, и читатель файла окон
+    /// про неё знает. Разложить свёрнутое нечем — на экране его нет, — а
+    /// клетку сетки оно заняло бы, и соседи ужались бы ради пустого места.
+    ///
+    /// Умолчание `true` — прежнее поведение: до этого флага раскладка брала
+    /// все ведомые окна подряд.
+    pub show_minimized: bool,
 }
 
 impl Default for Features {
     fn default() -> Self {
-        Self { placement: true, snapshots: true, requests: true, local_source: true }
+        Self {
+            placement: true,
+            snapshots: true,
+            requests: true,
+            local_source: true,
+            show_minimized: true,
+        }
     }
 }
 
@@ -246,6 +262,7 @@ pub fn parse_config(text: &str, hostname: &str) -> Config {
         snapshots: flag("snapshots"),
         requests: flag("requests"),
         local_source: flag("localSource"),
+        show_minimized: flag("showMinimized"),
     };
 
     Config {
@@ -298,6 +315,7 @@ pub fn to_json(cfg: &Config) -> serde_json::Value {
             "snapshots": cfg.features.snapshots,
             "requests": cfg.features.requests,
             "localSource": cfg.features.local_source,
+            "showMinimized": cfg.features.show_minimized,
         },
     })
 }
@@ -547,19 +565,31 @@ mod tests {
         let c = parse_config("sshHost: remote-host\n", "mac-host");
         assert_eq!(
             c.features,
-            Features { placement: true, snapshots: true, requests: true, local_source: true }
+            Features {
+                placement: true,
+                snapshots: true,
+                requests: true,
+                local_source: true,
+                show_minimized: true,
+            }
         );
     }
 
     #[test]
     fn features_are_read() {
         let c = parse_config(
-            "features:\n  placement: false\n  snapshots: false\n  requests: false\n  localSource: false\n",
+            "features:\n  placement: false\n  snapshots: false\n  requests: false\n  localSource: false\n  showMinimized: false\n",
             "mac-host",
         );
         assert_eq!(
             c.features,
-            Features { placement: false, snapshots: false, requests: false, local_source: false }
+            Features {
+                placement: false,
+                snapshots: false,
+                requests: false,
+                local_source: false,
+                show_minimized: false,
+            }
         );
     }
 
@@ -572,6 +602,7 @@ mod tests {
         assert!(c.features.placement, "нечитаемый флаг остаётся включённым");
         assert!(!c.features.snapshots);
         assert!(c.features.requests);
+        assert!(c.features.show_minimized);
     }
 
     #[test]
