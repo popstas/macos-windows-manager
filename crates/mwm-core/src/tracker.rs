@@ -97,6 +97,14 @@ pub struct Tracker {
     slots: HashMap<String, Slot>,
     bound: BTreeMap<String, Bound>,
     unresolved: Vec<String>,
+    /// Заголовки окон, привязавшихся к сессии **впервые** на этом такте.
+    ///
+    /// Отдельно от `unresolved`, а не вместе с ним: тот отвечает на «сессии
+    /// под этот заголовок нет вовсе» и уезжает человеку жалобой, а здесь
+    /// сессия как раз нашлась — вопрос лишь в том, та ли. Сложи их в один
+    /// список, и открытие любого окна печаталось бы в трее незнакомым
+    /// заголовком.
+    just_bound: Vec<String>,
     /// Первый такт после запуска не расставляет ничего. Отдельное правило, а не
     /// следствие: на первом такте прошлого такта нет, и все открытые окна
     /// выглядят только что появившимися.
@@ -113,6 +121,7 @@ impl Tracker {
             slots: HashMap::new(),
             bound: BTreeMap::new(),
             unresolved: Vec::new(),
+            just_bound: Vec::new(),
             started: false,
             placements: Vec::new(),
             dirty: false,
@@ -143,6 +152,7 @@ impl Tracker {
             // ним ради заголовка «kitty» незачем.
             self.placements.clear();
             self.unresolved.clear();
+            self.just_bound.clear();
             return;
         }
         // Двойники по заголовку: побеждает больший идентификатор — окно новее.
@@ -159,6 +169,7 @@ impl Tracker {
         self.windows.retain(|id, _| live.contains(id));
         self.bound.clear();
         self.unresolved.clear();
+        self.just_bound.clear();
         self.placements.clear();
         // `started` смотрим до того, как выставим его в true чуть ниже: этим
         // же значением заводимые в этом такте окна решают, заслужили ли они
@@ -229,6 +240,14 @@ impl Tracker {
                 continue;
             }
             if let Some(sid) = index.get(&key) {
+                // Первая привязка окна — тот единственный момент, когда индекс
+                // заведомо снят до сессии, которая в этом окне работает: окно
+                // только что открыли. Тёзка при этом находится (вчерашняя
+                // сессия с тем же именем), поэтому `unresolved` молчит, и
+                // попросить свежий дамп больше некому.
+                if t.session_id.is_none() {
+                    self.just_bound.push(key.clone());
+                }
                 t.session_id = Some(sid.id.clone());
             } else if !key.is_empty() {
                 // Заголовок устоялся, а сессии под него нет — значит, дамп
@@ -322,6 +341,12 @@ impl Tracker {
     }
 
     /// Устоявшиеся заголовки, которым дамп не нашёл сессии.
+    /// Заголовки окон, привязавшихся впервые: по ним дамп перечитывают
+    /// принудительно, не дожидаясь срока годности кеша.
+    pub fn just_bound(&self) -> Vec<String> {
+        self.just_bound.clone()
+    }
+
     pub fn unresolved(&self) -> Vec<String> {
         self.unresolved.clone()
     }
@@ -584,6 +609,41 @@ mod tests {
         let mut t = Tracker::new(1);
         t.tick(&[seen(1, "brand new session")], &BTreeMap::new(), 1_000);
         assert_eq!(t.unresolved(), vec!["brand new session".to_string()]);
+    }
+
+    #[test]
+    fn a_first_binding_asks_for_a_fresh_dump() {
+        // Дамп освежают, когда устоявшемуся заголовку не нашлось сессии вовсе.
+        // Тёзке этого не хватает: у только что заведённой сессии имя то же,
+        // что у вчерашней, — заголовок находится, `unresolved` пуст, дамп не
+        // перечитывается, и окно остаётся на старой навсегда.
+        //
+        // Снято живьём 2026-08-22: окно `ExpertizeMe` встало на сессию 48
+        // минут от роду, при том что работавшая была ей тёзкой нулевого
+        // возраста и в свежем дампе уже стояла.
+        //
+        // Момент открытия окна и есть тот единственный момент, когда индекс
+        // заведомо снят до этой сессии, — поэтому первая привязка требует
+        // свежего дампа сама, не дожидаясь, пока о ней спросит `unresolved`.
+        let mut t = Tracker::new(1);
+        t.tick(&[seen(1, "ExpertizeMe")], &index(&[("ExpertizeMe", SID)]), 1_000);
+        assert_eq!(
+            t.just_bound(),
+            vec!["ExpertizeMe".to_string()],
+            "первая привязка обязана попросить свежий дамп"
+        );
+        assert!(t.unresolved().is_empty(), "заголовок нашёлся — незнакомым он не считается");
+    }
+
+    #[test]
+    fn a_settled_binding_asks_for_nothing() {
+        // Оговорка к правилу выше, и без неё оно стоило бы ssh на каждом
+        // такте: просьба живёт ровно один такт, пока привязка новая.
+        let mut t = Tracker::new(1);
+        let idx = index(&[("ccfzf", SID)]);
+        t.tick(&[seen(1, "ccfzf")], &idx, 1_000);
+        t.tick(&[seen(1, "ccfzf")], &idx, 2_000);
+        assert!(t.just_bound().is_empty(), "привязка не новая — просить нечего");
     }
 
     #[test]

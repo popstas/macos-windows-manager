@@ -361,7 +361,11 @@ fn run_tracker(
         // Отставание в один такт стоит секунды, а спрашивать дважды за оборот
         // стоило бы второго ssh.
         let wanted = !tracker.unresolved().is_empty();
-        let index = cache.get(&cfg, now, wanted).clone();
+        // Просьба привязавшегося окна — с прошлого такта и по той же причине,
+        // что и `wanted`: за дампом идут до тика. Срока годности она не
+        // спрашивает — см. `Cache::get`.
+        let just_bound = !tracker.just_bound().is_empty();
+        let index = cache.get(&cfg, now, wanted, just_bound).clone();
         tracker.tick(&seen, &index, now);
         // Расстановка — здесь и только здесь: реестр окон не `Send` и живёт в
         // этом потоке. Клампинг считается в момент расстановки, а не при

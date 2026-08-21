@@ -62,6 +62,29 @@ The neighbouring tracker had already paid for this — `byActivityThen` in
 the fix simply never crossed over. Divergence is not catchable by behaviour:
 binding succeeds, the session has a window, it is merely the wrong session.
 
+**Ranking correctly is half the fix: the index has to be current, and a
+namesake is exactly the case that never refreshed it.** The dump is re-fetched
+only when a settled window title resolves to no session at all — `wanted =
+!tracker.unresolved().is_empty()` in `main.rs`. A brand-new session shares its
+name with yesterday's, so the title *does* resolve, `unresolved` stays empty,
+and the cached index — up to `dumpCacheMs` old, i.e. older than the session —
+is never replaced. `Rank` then ranks correctly over stale data and still picks
+the old twin.
+
+Verified the same evening the ranking fix shipped: windows named
+`ExpertizeMe-3`/`-4` bound to the right sessions only because the tracker had
+just restarted and fetched unconditionally (`fetched_ms == 0`), while the next
+window opened minutes later went straight back to a 48-minute-old namesake — the
+fresh session was already in the dump on disk, just not in the tracker's copy.
+
+`Tracker::just_bound` now lists windows that bound for the **first** time on
+this tick, and `Cache::get` takes that as `force`, ignoring `dumpCacheMs`. The
+moment a window is first bound is the one moment the index is guaranteed to
+predate the session behind it. It is kept apart from `unresolved` on purpose:
+that list is a complaint shown to the human, and folding the two together would
+print every newly opened window as an unknown title. The cost is one extra
+`ssh cat` per window opened by hand, not per tick.
+
 ## Signing and permissions
 
 **An unsigned binary loses its Accessibility permission on every build.** The

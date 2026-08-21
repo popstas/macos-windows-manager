@@ -84,9 +84,21 @@ impl Cache {
     /// `wanted` — трекеру попался заголовок, которого в индексе нет. Без этого
     /// признака ходили бы каждые пятнадцать секунд впустую: у машины, где
     /// ничего не открывали, индекс не меняется часами.
-    pub fn get(&mut self, cfg: &Config, now_ms: u64, wanted: bool) -> &BTreeMap<String, SessionRef> {
+    ///
+    /// `force` — окно привязалось впервые, и срок годности кеша тут не судья.
+    /// Сессию за этим окном завели секунды назад, а кеш свежим считается ещё
+    /// `dumpCacheMs`; за это время окно успевает привязаться к вчерашней
+    /// тёзке — и, раз тёзка нашлась, `wanted` об этом молчит. Лишний `ssh cat`
+    /// стоит окна, а не такта: окна открывают руками и редко.
+    pub fn get(
+        &mut self,
+        cfg: &Config,
+        now_ms: u64,
+        wanted: bool,
+        force: bool,
+    ) -> &BTreeMap<String, SessionRef> {
         let stale = now_ms.saturating_sub(self.fetched_ms) >= cfg.dump_cache_ms;
-        if (wanted && stale) || self.fetched_ms == 0 {
+        if (wanted && stale) || force || self.fetched_ms == 0 {
             match fetch(&cfg.ssh_host) {
                 Ok(text) => {
                     let idx = parse_index(&text);
