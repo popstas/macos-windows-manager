@@ -11,6 +11,46 @@ pub struct SessionRef {
     pub cwd: String,
 }
 
+/// Чем сессия доказывает, что окно с этим заголовком принадлежит ей.
+///
+/// `activity` — отметка хука (`activityAt` в дампе): хук стучит на каждый вызов
+/// инструмента работающего агента, поэтому свежая отметка — довод сильнее
+/// любого другого. `mtime` — свежесть транскрипта, а у сессии, чей файл ещё не
+/// заведён, момент старта её процесса.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Rank {
+    activity: f64,
+    mtime: f64,
+}
+
+impl Rank {
+    /// Главнее ли эта сессия прежней. Три случая, и различать их обязательно.
+    ///
+    /// - у обеих есть отметка — она и решает: `mtime` двигают служебные
+    ///   записи, и по нему брошенная сессия выглядит свежее работающей;
+    /// - ни у одной нет — хуков на машине не стоит, спорить не о чем, остаётся
+    ///   свежесть файла;
+    /// - у одной есть, у другой нет — сравнивать ноль с чужой отметкой как
+    ///   число нельзя. Ноль значит «хук про эту сессию не писал», а не
+    ///   «активности не было с 1970 года», и запись без отметки проигрывала по
+    ///   одному факту её отсутствия: только что заведённая сессия отдавала
+    ///   своё окно суточной тёзке навсегда. Сравнивается то, что есть у обеих.
+    ///
+    /// Два последних случая складываются в одно выражение: там, где отметки
+    /// нет, `max` и так отдаёт `mtime`.
+    ///
+    /// То же правило и по той же причине живёт у соседнего трекера —
+    /// `byActivityThen` в `windows11-manager/src/claude-wt/sessions-helpers.js`.
+    /// Расхождение поведением не поймать: привязка проходит, окно у сессии
+    /// есть, просто не у той.
+    fn outranks(self, prev: Rank) -> bool {
+        if self.activity > 0.0 && prev.activity > 0.0 {
+            return self.activity > prev.activity;
+        }
+        self.activity.max(self.mtime) > prev.activity.max(prev.mtime)
+    }
+}
+
 /// «Очищенный заголовок → сессия: id и каталог» из дампа агрегатора.
 ///
 /// Недоверие к содержимому то же, что у файла окон: запись без id или без
@@ -20,7 +60,7 @@ pub fn parse_index(json: &str) -> BTreeMap<String, SessionRef> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return BTreeMap::new();
     };
-    let mut out: BTreeMap<String, (SessionRef, f64)> = BTreeMap::new();
+    let mut out: BTreeMap<String, (SessionRef, Rank)> = BTreeMap::new();
     for s in v.get("sessions").and_then(|s| s.as_array()).into_iter().flatten() {
         let (Some(id), Some(title)) = (
             s.get("id").and_then(|x| x.as_str()),
@@ -34,12 +74,14 @@ pub fn parse_index(json: &str) -> BTreeMap<String, SessionRef> {
         }
         let cwd = s.get("cwd").and_then(|x| x.as_str()).unwrap_or_default().to_string();
         let activity = s.get("activityAt").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        // Тёзки: побеждает свежесть активности. Иначе только что открытая
-        // сессия проигрывала бы суточной тёзке навсегда.
+        let mtime = s.get("mtime").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let rank = Rank { activity, mtime };
+        // Тёзки: побеждает свежесть. Иначе только что открытая сессия
+        // проигрывала бы суточной тёзке навсегда.
         match out.get(&key) {
-            Some((_, prev)) if *prev >= activity => {}
+            Some((_, prev)) if !rank.outranks(*prev) => {}
             _ => {
-                out.insert(key, (SessionRef { id: id.to_string(), cwd }, activity));
+                out.insert(key, (SessionRef { id: id.to_string(), cwd }, rank));
             }
         }
     }
@@ -123,6 +165,56 @@ mod tests {
             idx.get("other"),
             Some(&r(D, "")),
             "живее вторая запись — правило «никогда не перезаписывать первую» выбрало бы C"
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_beats_a_namesake_with_a_cooled_stamp() {
+        // Отметка хука бывает только у той сессии, которая успела вызвать хоть
+        // один инструмент. У только что заведённой её нет вовсе, и сравнение
+        // одних лишь `activityAt` отдавало окно тёзке навсегда — по одному
+        // факту отсутствия отметки, а не по свежести.
+        //
+        // Снято живьём 2026-08-22 на паре `ExpertizeMe`: у работающей
+        // `activityAt: 0` и `mtime` момента старта процесса (04:12:31), у
+        // двадцатиминутной тёзки — отметка 04:04:25. Окно ушло к старой,
+        // агрегатор от этого пометил её живой (`live |= set(windows)`), и в
+        // пикере она встала с чужими сообщениями и чужим возрастом. Ту же
+        // ошибку и тем же правилом чинил у себя windows11-manager
+        // (`byActivityThen` в `sessions-helpers.js`, замер 2026-08-12).
+        //
+        // Порядок записей взят в обе стороны: иначе тест доказывал бы
+        // «выигрывает последняя строка», а не само правило.
+        let fresh = format!(r#"{{"id":"{A}","title":"ExpertizeMe","activityAt":0,"mtime":1787353951}}"#);
+        let cooled =
+            format!(r#"{{"id":"{B}","title":"ExpertizeMe","activityAt":1787353465,"mtime":1787353549}}"#);
+        let doc = |first: &String, second: &String| format!(r#"{{"sessions":[{first},{second}]}}"#);
+        assert_eq!(
+            parse_index(&doc(&fresh, &cooled)).get("ExpertizeMe"),
+            Some(&r(A, "")),
+            "новая сессия названа первой"
+        );
+        assert_eq!(
+            parse_index(&doc(&cooled, &fresh)).get("ExpertizeMe"),
+            Some(&r(A, "")),
+            "новая сессия названа второй"
+        );
+    }
+
+    #[test]
+    fn two_stamps_are_compared_between_themselves() {
+        // Оговорка к правилу выше, и она обязательна. Отметка хука — довод
+        // сильнее свежести файла: `mtime` двигают служебные записи, и по нему
+        // давно брошенная сессия выглядит свежее работающей. Поэтому там, где
+        // отметка есть у обеих, решает она, а `mtime` не заглядывает вовсе.
+        let idx = parse_index(&format!(
+            r#"{{"sessions":[{{"id":"{A}","title":"ccfzf","activityAt":99,"mtime":10}},
+                             {{"id":"{B}","title":"ccfzf","activityAt":10,"mtime":9999}}]}}"#
+        ));
+        assert_eq!(
+            idx.get("ccfzf"),
+            Some(&r(A, "")),
+            "свежая отметка главнее чужого mtime"
         );
     }
 

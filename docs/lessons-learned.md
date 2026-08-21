@@ -37,6 +37,31 @@ the pane title, i.e. it stands after the prefix.
 an empty file, but no file: an empty one would mean "no windows" and would clear
 marks set by other machines' trackers.
 
+**A brand-new session has no hook stamp, and ranking namesakes by `activityAt`
+alone handed its window to the older twin — forever.** The stamp is written by
+the agent's hook, which fires on every tool call, so a session that has not run
+one yet arrives with `activityAt: 0`. Compared as a number, zero loses to any
+stamp at all, however cold — so the freshly opened window bound to yesterday's
+session of the same name. The aggregator then marks that old session live
+(`live |= set(windows)` in `ccfzf`), and the picker shows it in place of the new
+one: old messages, old age, dimmed as stale. Focus still worked, which is what
+made it look like a display glitch rather than a wrong binding — the window is
+real, it is just filed under the wrong id.
+
+Measured live on 2026-08-22 on a pair named `ExpertizeMe`: the working session
+had `activityAt: 0` and `mtime` at its process start (04:12:31), the twenty-
+minute-old twin a stamp from 04:04:25. `Rank::outranks` in `index.rs` now
+decides in three cases — both stamped, the stamp wins; otherwise
+`max(activityAt, mtime)`, because zero means "the hook never wrote about this
+session", not "no activity since 1970". The stamp still outranks `mtime` where
+both sides have one: service records move `mtime`, so an abandoned session can
+look fresher than a working one.
+
+The neighbouring tracker had already paid for this — `byActivityThen` in
+`windows11-manager/src/claude-wt/sessions-helpers.js`, measured 2026-08-12 — and
+the fix simply never crossed over. Divergence is not catchable by behaviour:
+binding succeeds, the session has a window, it is merely the wrong session.
+
 ## Signing and permissions
 
 **An unsigned binary loses its Accessibility permission on every build.** The
