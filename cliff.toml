@@ -1,0 +1,59 @@
+# The changelog is built from commits: `git-cliff -o CHANGELOG.md`.
+# Notes for a single release: `./scripts/changelog.sh v0.7.0`.
+[changelog]
+header = """# Changelog
+
+Everything notable that changed between versions. Generated from commits
+with `git-cliff -o CHANGELOG.md` — do not edit by hand.\n
+"""
+body = """
+
+{% if version -%}
+    ## {{ version }} — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+    ## Unreleased
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}{{ commit.scope }}: {% endif %}{{ commit.message | upper_first }}\
+{% if commit.breaking %} **BREAKING**{% endif %}
+{%- endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+# The `<!-- N -->` prefixes fix the group order; they are stripped here.
+postprocessors = [
+    { pattern = "<!-- [0-9] -->", replace = "" },
+]
+
+[git]
+conventional_commits = true
+# Unconventional commits are dropped: git-cliff puts the whole commit body into
+# `message` for those, and a squash merge would sprawl across two pages.
+filter_unconventional = true
+split_commits = false
+# group_by sorts alphabetically, so the order is carried by the comment number.
+commit_parsers = [
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactor" },
+    { message = "^doc", group = "<!-- 4 -->Documentation" },
+    { message = "^test", group = "<!-- 5 -->Testing" },
+    { message = "^build|^ci", group = "<!-- 6 -->Build" },
+    # Housekeeping: version bumps and TODO-list notes say nothing to a reader.
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore: версия", skip = true },
+    { message = "^chore: version", skip = true },
+    { message = "^task", skip = true },
+    { message = "^wip", skip = true },
+    { message = "^Merge ", skip = true },
+    { message = "^chore", group = "<!-- 7 -->Miscellaneous" },
+    { message = "^style", group = "<!-- 8 -->Styling" },
+]
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "newest"
