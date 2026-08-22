@@ -34,7 +34,26 @@ The app has no windows of its own — only a status-bar icon.
 
 ## Install
 
-There are no prebuilt binaries yet — the app is built and deployed from source.
+macOS on Apple Silicon, from the Homebrew tap:
+
+```sh
+brew trust --tap popstas/apps
+brew install --cask --no-quarantine popstas/apps/macos-windows-manager
+```
+
+`brew trust` is needed once per tap: Homebrew 6.0.0+ will not load a cask from an
+untrusted tap. `--no-quarantine` is needed because the app is not signed with an
+Apple Developer ID, and Gatekeeper refuses unsigned apps with a "damaged" message.
+
+⚠️ **Grant Accessibility again after every upgrade.** The permission is bound to the
+code signature, and an unsigned build gets a fresh one every time it is built.
+Nothing announces the loss: the process stays alive, the icon stays in the status
+bar, and the window file goes stale. Only a Developer ID signature would end this,
+and there is none.
+
+The cask installs the app and nothing else — no LaunchAgent, no autostart.
+
+### From source
 
 ```sh
 cargo test -p mwm-core       # logic, runs on any machine
