@@ -1,0 +1,187 @@
+# Релиз по тегу: приложение под macOS и обновлённая каска в popstas/homebrew-apps.
+name: Release
+
+on:
+  push:
+    # Теги ставятся руками, без префикса компонента. Расхождение тега с версией
+    # ловит шаг ниже — молчаливый релиз без артефактов уже случался у соседей.
+    tags: ['v*']
+  # Ради тега, который уже стоит: пересобрать релиз, не переставляя тег
+  # (`gh workflow run release.yml --ref v0.8.0`).
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # `[profile.release]` в Cargo.toml собран под скорость перевыкатки на свою
+  # машину — там `incremental = true` и намеренно нет LTO, с замерами в
+  # комментарии. Здесь вопрос обратный: артефакт качают, а не пересобирают.
+  # Своего `--profile` у `tauri build` нет, поэтому профиль перекрывается
+  # сборочными переменными — они живут только в этом workflow, и на
+  # `deploy-mac.sh` не влияют.
+  CARGO_PROFILE_RELEASE_LTO: fat
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '1'
+  CARGO_PROFILE_RELEASE_INCREMENTAL: 'false'
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: z
+
+jobs:
+  build-macos:
+    # macos-latest — Apple Silicon, то есть сборка идёт под arm64 без возни с
+    # целями. Universal не собирается намеренно: он удвоил бы вес.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag matches version
+        run: ./scripts/check-version.sh "${{ github.ref_name }}"
+
+      # CLI берётся из npm, а не `cargo install tauri-cli`: там он готовым
+      # бинарём на платформу, секунды против минут компиляции.
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      # MWM_RELEASE=1 обязателен: без него последний пункт меню трея показывает
+      # время сборки, а релизная сборка должна называться версией.
+      - name: Build app
+        env:
+          MWM_RELEASE: '1'
+        run: tauri build
+
+      # ditto, а не zip: у .app внутри симлинки и расширенные атрибуты, обычный
+      # zip приносит на ту сторону сломанный бандл. Имя несёт версию — его же
+      # подставляет каска в url.
+      - name: Pack app
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          mkdir -p dist
+          ditto -c -k --keepParent \
+            "target/release/bundle/macos/macos-windows-manager.app" \
+            "dist/macos-windows-manager-macos-arm64-${VERSION}.zip"
+          ls -la dist
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-windows-manager-macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-cliff считает заметки по диапазону тегов — на мелкой копии
+          # предыдущего тега не видно, и в заметки уехала бы вся история.
+          fetch-depth: 0
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-windows-manager-macos
+          path: artifacts
+
+      - name: Generate release notes
+        id: release_notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Приписки про карантин и Accessibility — не украшение. Приложение не
+      # подписано Developer ID, и оба отказа выглядят не отказами в правах:
+      # Gatekeeper говорит «повреждено», а трекер без Accessibility остаётся жив
+      # и молча перестаёт публиковать.
+      #
+      # Заметки уезжают в переменную окружения, а не подстановкой в текст
+      # скрипта: в сообщении коммита бывают кавычки и доллары.
+      - name: Compose release body
+        env:
+          NOTES: ${{ steps.release_notes.outputs.content }}
+        run: |
+          set -euo pipefail
+          cat > body.md <<'HEAD_EOF'
+          ## Install
+
+          macOS, Apple Silicon:
+
+          ```
+          brew trust --tap popstas/apps
+          brew install --cask --no-quarantine popstas/apps/macos-windows-manager
+          ```
+
+          `--no-quarantine` is required: the app is not signed with an Apple Developer ID,
+          and Gatekeeper refuses unsigned apps with a "damaged" message.
+
+          Grant Accessibility to the app afterwards, and **again after every upgrade**:
+          the permission is bound to the code signature, and an unsigned build gets a new
+          one every time it is built. Without it the tracker stays alive and silently stops
+          publishing.
+
+          HEAD_EOF
+          printf '%s\n' "$NOTES" >> body.md
+          cat body.md
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: body.md
+          files: artifacts/*
+
+  update-homebrew:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      # GITHUB_TOKEN в чужой репозиторий не пускают — нужен PAT с правом записи
+      # в тап. Без секрета шаг падает на чекауте, красно и вслух.
+      - name: Check out tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: popstas/homebrew-apps
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-windows-manager-macos
+          path: macos-dist
+
+      - name: Update cask
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          MAC_SHA=$(sha256sum macos-dist/macos-windows-manager-macos-arm64-*.zip | awk '{print $1}')
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" tap/Casks/macos-windows-manager.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${MAC_SHA}\"/" tap/Casks/macos-windows-manager.rb
+          cat tap/Casks/macos-windows-manager.rb
+
+      - name: Commit and push tap update
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${GITHUB_REF#refs/tags/}"
+          git add -A
+          git diff --staged --quiet || git commit -m "macos-windows-manager ${TAG}"
+          # В тап пишет теперь не один репозиторий, а три, и два тега рядом дают
+          # отказ по non-fast-forward. Каски у всех разные, так что перемотка
+          # решает всё сама.
+          git pull --rebase --quiet
+          git push
