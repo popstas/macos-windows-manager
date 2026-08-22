@@ -64,9 +64,18 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          # Бандл ищется, а не называется путём: в workspace cargo кладёт его в
+          # корневой target/, а не в src-tauri/target/, и ошибка в этой строке
+          # проявилась бы только на теге. Промах здесь обязан быть громким и
+          # показывать, что вообще собралось.
+          APP="$(find target -type d -name 'macos-windows-manager.app' -path '*/bundle/macos/*' | head -1)"
+          if [ -z "$APP" ]; then
+            echo "bundle not found; собралось вот что:" >&2
+            find target -maxdepth 6 -name '*.app' -type d >&2 || true
+            exit 1
+          fi
           mkdir -p dist
-          ditto -c -k --keepParent \
-            "target/release/bundle/macos/macos-windows-manager.app" \
+          ditto -c -k --keepParent "$APP" \
             "dist/macos-windows-manager-macos-arm64-${VERSION}.zip"
           ls -la dist
 
