@@ -159,6 +159,30 @@ pub fn fingerprint(bound: &BTreeMap<String, Bound>, can_focus: bool) -> String {
     out
 }
 
+/// Узкий отпечаток для сигнала пикеру — только то, из-за чего снимок скрытого
+/// пикера соврёт хоткею.
+///
+/// Второй рядом с `fingerprint`, а не он сам: в тот входит `focused_at`, и
+/// сигналь мы по нему — пикер ходил бы по ssh на каждое переключение окна.
+/// Сюда входит состав привязанных сессий, свёрнутость (свёрнутое окно уходит
+/// из плитки) и `can_focus` (от него зависит сама развилка Enter). Заголовок и
+/// терминал не входят: это подпись и буква, а не ответ на вопрос «есть ли
+/// здесь окно».
+///
+/// Проектных хоткеев здесь нет, и это не пропуск: их источник —
+/// `claudeWt.projects` у windows11-manager, и маковский трекер о них не знает
+/// ничего.
+pub fn signal_print(bound: &BTreeMap<String, Bound>, can_focus: bool) -> String {
+    let mut out = String::new();
+    out.push(if can_focus { 'F' } else { 'f' });
+    for (sid, b) in bound {
+        out.push('|');
+        out.push_str(sid);
+        out.push(if b.minimized { 'm' } else { '.' });
+    }
+    out
+}
+
 /// Писать ли файл на этом такте.
 pub fn should_write(
     fingerprint: &str,
@@ -390,5 +414,45 @@ mod tests {
     fn change_writes_at_once() {
         assert!(should_write("abc", Some("xyz"), 1_000, 1_001));
         assert!(should_write("abc", None, 0, 1), "первая запись обязана состояться");
+    }
+
+    #[test]
+    fn a_narrow_print_ignores_a_look_at_the_window() {
+        // То же правило и та же причина, что у Windows-трекера: focused_at
+        // меняется на каждое переключение окна, и сигналь мы по нему — пикер
+        // ходил бы по ssh десятки раз в минуту. Заголовок и терминал не входят
+        // по той же мерке: это подпись и буква, а не «есть ли здесь окно».
+        let a = bound("имя", 1_000);
+        let mut b = bound("другой заголовок", 9_999);
+        b.get_mut(SID).unwrap().focused_at_ms = 123;
+        b.get_mut(SID).unwrap().app = "wezterm".to_string();
+        assert_eq!(signal_print(&a, true), signal_print(&b, true));
+    }
+
+    #[test]
+    fn a_narrow_print_notices_a_new_binding() {
+        let a = bound("имя", 1_000);
+        let mut b = bound("имя", 1_000);
+        let mut second = b[SID].clone();
+        second.session_id = "bbbbbbbb-1111-2222-3333-444444444444".to_string();
+        b.insert(second.session_id.clone(), second);
+        assert_ne!(signal_print(&a, true), signal_print(&b, true));
+    }
+
+    #[test]
+    fn a_narrow_print_notices_a_minimized_window() {
+        // Свёрнутое окно уходит из плитки, и снимок пикера обязан это знать.
+        assert_ne!(
+            signal_print(&bound("имя", 1_000), true),
+            signal_print(&bound_minimized("имя", 1_000), true)
+        );
+    }
+
+    #[test]
+    fn a_narrow_print_notices_can_focus_flipping() {
+        // От него зависит сама развилка Enter: выключился брокер — подъём окна
+        // перестал быть возможен, а снимок пикера об этом не знает.
+        let a = bound("имя", 1_000);
+        assert_ne!(signal_print(&a, true), signal_print(&a, false));
     }
 }
