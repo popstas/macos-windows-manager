@@ -270,6 +270,10 @@ fn run_tracker(
     // окно по одному такту, а считала бы его по другому.
     let mut minimized: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut last_print: Option<String> = None;
+    // Прошлый узкий отпечаток, записанный в сигнал пикеру. Своя переменная,
+    // а не `last_print`: у сигнала своё правило записи (только на смену
+    // отпечатка, без сердцебиения) и свой, более узкий состав.
+    let mut last_signal: Option<String> = None;
     // Прошлая жалоба на непривязанные окна — чтобы не повторять её каждый такт.
     // Хранится сама строка, а не отметка времени: повод сказать снова — другая
     // картина, а не прошедший срок.
@@ -547,6 +551,17 @@ fn run_tracker(
 
         let print = fingerprint(&bound, focus);
 
+        // Сигнал пикеру этой машины. Своё правило записи, а не гейт файла
+        // окон: у того сердцебиение в полминуты, и оно будило бы скрытый пикер
+        // впустую.
+        let signal = mwm_core::publish::signal_print(&bound, focus);
+        if last_signal.as_deref() != Some(signal.as_str()) {
+            match write_tracker_signal(&signal, &cfg.host, pid, now) {
+                Ok(()) => last_signal = Some(signal),
+                Err(e) => mwm_log!("signal write failed: {e}"),
+            }
+        }
+
         // Ошибка чтения дампа и ошибка записи файла окон — про разные машины
         // и разные починки, и одна не должна прятать другую. Без этой строки
         // трекер с нечитаемым дампом выглядел бы неотличимо от трекера, у
@@ -645,6 +660,24 @@ fn run_tracker(
             );
         }
     }
+}
+
+/// Уронить сигнал в каталог настроек пикера этой машины.
+///
+/// Путь и имя ключа — единственное, что связывает нас с пикером; сам отпечаток
+/// контрактом не является, его считает каждый трекер свой. Нет `HOME` — писать
+/// некуда, и это не беда: пикера на такой машине нет тем более.
+fn write_tracker_signal(print: &str, host: &str, pid: u32, now_ms: u64) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let dir = std::path::Path::new(&home).join(".config/ccfzf-picker");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let body = serde_json::json!({
+        "generated": now_ms / 1000,
+        "host": host,
+        "pid": pid,
+        "print": print,
+    });
+    mwm_core::state::write_atomic(&dir.join("tracker-signal.json"), &body)
 }
 
 /// Снимки с диска. Формат — тот же, что уезжает в файле окон, и разбирается он
