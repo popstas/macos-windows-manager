@@ -14,8 +14,8 @@ nowhere to verify it except the very machine it runs on.
 
 ## The build stamp
 
-The last tray menu item is a build stamp: `v0.7.0 · 17:42` for today's build,
-`v0.7.0 · 2026-08-13 17:42` for an older one. It exists because deploying
+The last tray menu item is a build stamp: `v0.8.0 · 17:42` for today's build,
+`v0.8.0 · 2026-08-13 17:42` for an older one. It exists because deploying
 replaces the binary in place while every build between releases carries the same
 version — without the stamp there is no way to tell after a restart that the new
 one came up.

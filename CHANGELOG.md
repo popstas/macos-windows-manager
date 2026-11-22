@@ -4,13 +4,23 @@ Everything notable that changed between versions. Generated from commits
 with `git-cliff -o CHANGELOG.md` — do not edit by hand.
 
 
-## Unreleased
+## v0.8.0 — 2026-11-22
 
 ### Features
 
+- tracker: Сигнал пикеру о смене состава окон
 - publish: Свёрнутость окна уезжает читателю
 - layout: Свёрнутые окна выпадают из раскладки
 - layout: Глобальный хоткей плитки уходит пикеру
+
+### Bug Fixes
+
+- tracker: Первая привязка окна освежает дамп, не спрашивая срок годности
+- index: Новая сессия не отдаёт своё окно тёзке с остывшей отметкой
+
+### Documentation
+
+- README на английском, CHANGELOG.md собирается git-cliff'ом
 
 ## v0.7.0 — 2026-08-18
 
