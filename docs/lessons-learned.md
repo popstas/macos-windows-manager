@@ -85,6 +85,24 @@ that list is a complaint shown to the human, and folding the two together would
 print every newly opened window as an unknown title. The cost is one extra
 `ssh cat` per window opened by hand, not per tick.
 
+**A binding lives in memory, keyed by window id — and the id does not survive.**
+The tracker restarts, and the screen sleeps: windows come back as new elements
+(see the `nameless` fixture in `tracker.rs`). Until 2026-11-22 the only way back
+was the index, and for one kind of session the index is gone exactly then. A
+session whose agent died but whose terminal stays open (`kitty --hold`) is kept
+in the `ccfzf` dump past its `--limit` cut only because it is live, and it is
+live only by its window record (`live |= set(windows)`). Lose the binding and you
+lose the record, the dump drops the session, and the window can never bind
+again: a closed loop, reproduced on fixtures in `ccfzf` (`--limit 2`, three
+transcripts). When the index does not know a settled title, `Tracker::tick` now
+falls back to the persisted slots: the slot with the same title, the most
+recently seen one winning. That is the rule `resolveSession` in
+`windows11-manager/src/claude-wt/tracker-helpers.js` has always had, which is
+why the loop never showed up on Windows. A slot can belong to yesterday's
+namesake, so the fallback counts as a first binding (`just_bound`): the dump is
+re-fetched unconditionally, and if the working session is in it, the next tick
+moves the window there through the index branch.
+
 ## Signing and permissions
 
 **An unsigned binary loses its Accessibility permission on every build.** The
