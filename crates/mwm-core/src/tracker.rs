@@ -260,6 +260,33 @@ impl Tracker {
                 // перестань спрашивать — строка навсегда осталась бы на
                 // прошлой сессии, а работающая не была бы видна вовсе.
                 self.unresolved.push(key.clone());
+                // Окно без привязки, а индекс заголовка не знает: откат на
+                // слоты, тем же правилом, что `resolveSession` у
+                // windows11-manager, — слот с тем же заголовком, побеждает
+                // виденный последним. Привязка живёт в памяти по номеру окна,
+                // а номер теряется на перезапуске трекера и на гашении экрана
+                // (окна приезжают новыми элементами). Вернуть её мог только
+                // индекс, а сессию с мёртвым процессом за пределом `--limit`
+                // в дампе держит одна запись окна: пропала привязка — пропала
+                // и запись, и окно оставалось ничьим навсегда.
+                //
+                // Слоты переживают перезапуск (`load_slots`), поэтому откат
+                // работает и там. Попасть так можно и во вчерашнюю тёзку,
+                // поэтому окно считается привязанным впервые: `just_bound`
+                // освежит дамп безусловно, и если работающая сессия там есть,
+                // следующий такт уведёт окно к ней веткой выше.
+                if t.session_id.is_none() {
+                    let from_slot = self
+                        .slots
+                        .iter()
+                        .filter(|(_, s)| s.title == key)
+                        .max_by_key(|(sid, s)| (s.last_seen_ms, sid.as_str()))
+                        .map(|(sid, _)| sid.clone());
+                    if let Some(sid) = from_slot {
+                        self.just_bound.push(key.clone());
+                        t.session_id = Some(sid);
+                    }
+                }
             }
             let Some(sid) = t.session_id.clone() else { continue };
             let slot = self.slots.entry(sid.clone()).or_default();
@@ -662,6 +689,77 @@ mod tests {
         const SID2: &str = "cccccccc-1111-2222-3333-444444444444";
         t.tick(&[seen(1, "ccfzf-2")], &index(&[("ccfzf-2", SID2)]), 3_000);
         assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID2]);
+    }
+
+    #[test]
+    fn a_window_with_a_new_id_rebinds_from_its_slot_when_the_index_lost_it() {
+        // Привязка живёт в памяти, по номеру окна, а номер теряется: после
+        // гашения экрана окна приезжают новыми элементами (см. `nameless`),
+        // после перезапуска трекера — тем более. Вернуть её мог только индекс,
+        // а сессии с мёртвым процессом за пределом `--limit` в дампе держит
+        // одна запись окна — пропала привязка, пропала и запись. Кольцо:
+        // окно на экране есть, сессии у него нет никогда. Разбор 2026-11-22
+        // на паре `ExpertizeMe-2` (docs/TODO.md в ccfzf-picker). Слот с тем
+        // же заголовком при этом помнится — по нему и возвращаемся, тем же
+        // правилом, что `resolveSession` у windows11-manager.
+        let mut t = Tracker::new(2);
+        let idx = index(&[("ExpertizeMe-2", SID)]);
+        t.tick(&[seen(1, "ExpertizeMe-2")], &idx, 1_000);
+        t.tick(&[seen(1, "ExpertizeMe-2")], &idx, 2_000);
+        assert!(t.bound().contains_key(SID), "до потери номера окно привязано");
+        let empty = BTreeMap::new();
+        t.tick(&[seen(7, "ExpertizeMe-2")], &empty, 3_000);
+        t.tick(&[seen(7, "ExpertizeMe-2")], &empty, 4_000);
+        assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID], "окно вернулось к сессии по слоту");
+        // Индекс про заголовок молчит — значит, дамп всё равно пора освежить:
+        // по слоту можно попасть и во вчерашнюю тёзку.
+        assert_eq!(t.unresolved(), vec!["ExpertizeMe-2".to_string()]);
+        assert_eq!(t.just_bound(), vec!["ExpertizeMe-2".to_string()], "первая привязка просит свежий дамп");
+    }
+
+    #[test]
+    fn a_slot_fallback_goes_to_the_most_recently_seen_namesake() {
+        // Слотов с одним заголовком бывает несколько: имя мёртвой сессии
+        // раздаётся снова. Побеждает тот, кого видели последним, — как у
+        // windows11-manager. Порядок слотов взят в обе стороны, иначе тест
+        // доказывал бы порядок обхода, а не правило.
+        const OLD: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+        for (first, second) in [(OLD, SID), (SID, OLD)] {
+            let mut slots = BTreeMap::new();
+            let at = |sid: &str| if sid == SID { 9_000 } else { 5_000 };
+            for sid in [first, second] {
+                slots.insert(
+                    sid.to_string(),
+                    SlotState {
+                        bounds: None,
+                        title: "ExpertizeMe-2".to_string(),
+                        cwd: String::new(),
+                        last_seen_ms: at(sid),
+                        focused_at_ms: 0,
+                    },
+                );
+            }
+            let mut t = Tracker::new(1);
+            t.load_slots(slots);
+            t.tick(&[seen(1, "ExpertizeMe-2")], &BTreeMap::new(), 10_000);
+            assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID]);
+        }
+    }
+
+    #[test]
+    fn a_slot_fallback_never_overrides_the_index() {
+        // Откат — только когда индекс молчит. Знает индекс — решает он: слот
+        // помнит прошлое, а дамп — то, что работает сейчас.
+        const OLD: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            OLD.to_string(),
+            SlotState { bounds: None, title: "ccfzf".to_string(), cwd: String::new(), last_seen_ms: 9_000, focused_at_ms: 0 },
+        );
+        let mut t = Tracker::new(1);
+        t.load_slots(slots);
+        t.tick(&[seen(1, "ccfzf")], &index(&[("ccfzf", SID)]), 10_000);
+        assert_eq!(t.bound().keys().collect::<Vec<_>>(), vec![SID]);
     }
 
     #[test]
